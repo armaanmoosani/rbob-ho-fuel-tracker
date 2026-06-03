@@ -1860,8 +1860,11 @@ def resolve_active_schwab_symbol(prefix, now, access_token, candidate_months=4):
                     best_symbol = symbol
 
             if best_symbol:
-                print(f"[{prefix}] Resolved active Schwab symbol from live quotes (fallback): {best_symbol}")
-                return best_symbol
+                if best_score[1] >= 100:
+                    print(f"[{prefix}] Resolved active Schwab symbol from live quotes (fallback): {best_symbol} (volume: {best_score[1]:.0f})")
+                    return best_symbol
+                else:
+                    print(f"[{prefix}] Schwab volume fallback bypassed: max volume {best_score[1]:.0f} is below threshold of 100.")
         except Exception as exc:
             print(f"[{prefix}] Schwab volume resolution failed: {exc}.")
 
