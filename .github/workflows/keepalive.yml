@@ -1,15 +1,12 @@
 name: Keep Alive
 
 # Prevents GitHub from auto-disabling the scheduled tracker workflow
-# after 60 days of repository inactivity.
+# after 60 days of repository inactivity. Runs on the 1st of each month.
 on:
   schedule:
     # Runs on the 1st of every month at 9:00 AM CT (15:00 UTC)
     - cron: '0 15 1 * *'
   workflow_dispatch:
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 jobs:
   keepalive:
@@ -20,5 +17,25 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Keep workflows alive
-        uses: gautamkrishnar/keepalive-workflow@v2
+
+      - name: Re-enable any disabled scheduled workflows
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+          echo "Checking for disabled workflows in $REPO..."
+          # List all workflows and re-enable any that are disabled
+          gh workflow list --repo "$REPO" --json id,name,state \
+            | jq -r '.[] | select(.state == "disabled_inactivity") | .id' \
+            | while read -r wf_id; do
+                echo "Re-enabling workflow ID $wf_id"
+                gh workflow enable "$wf_id" --repo "$REPO" || true
+              done
+          echo "Keep-alive complete."
+
+      - name: Confirm active workflows
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow list --repo "${{ github.repository }}" --json name,state \
+            | jq -r '.[] | "\(.name): \(.state)"'
