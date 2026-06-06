@@ -39,7 +39,7 @@ def mask_sensitive_text(text):
         return ""
     text = str(text)
     sensitive_vals = []
-    for env_var in ['GMAIL_USER', 'GRAVES_EMAIL', 'TO_EMAIL', 'PHONE_SMS_ADDRESS']:
+    for env_var in ['GMAIL_USER', 'GRAVES_EMAIL', 'TO_EMAIL']:
         val = os.environ.get(env_var, '')
         if val:
             for item in val.split(','):
@@ -515,18 +515,13 @@ def main():
     email_user = os.environ.get('GMAIL_USER')
     email_pass = os.environ.get('GMAIL_APP_PASSWORD')
     email_to_env = os.environ.get('TO_EMAIL', '')
-    phone_to_env = os.environ.get('PHONE_SMS_ADDRESS', '')
-    
+
     if not email_user or not email_pass:
         print("Missing email credentials. Cannot send report.")
         return
-        
-    recipients = []
-    if email_to_env:
-        recipients.extend([e.strip() for e in email_to_env.split(',') if e.strip()])
-    if phone_to_env:
-        recipients.extend([p.strip() for p in phone_to_env.split(',') if p.strip()])
-        
+
+    recipients = [e.strip() for e in email_to_env.split(',') if e.strip()]
+    
     # Deduplicate keeping order
     seen = set()
     emails = []

@@ -1497,25 +1497,6 @@ class TestCategory12ProductionFailureProtection(unittest.TestCase):
         saved_state = mock_save.call_args[0][0]
         self.assertEqual(saved_state['ACTIVE_SYMBOL_RB_2026-05-22'], '/RBN26')
 
-    @patch('main.TO_PHONE_SMS', ['test@vzwpix.com'])
-    @patch('smtplib.SMTP')
-    def test_12_6_sms_gateway_silent_outbound_failure(self, mock_smtp):
-        # Mock SMTP to raise exception on connection/login
-        mock_smtp.side_effect = Exception("SMTP server unavailable")
-        
-        import sys
-        from io import StringIO
-        old_stdout = sys.stdout
-        sys.stdout = mystdout = StringIO()
-        
-        try:
-            main.send_sms({}, datetime.now(), {'label': 'Final Verdict'})
-        finally:
-            sys.stdout = old_stdout
-            
-        output = mystdout.getvalue()
-        self.assertIn("LOG_OUTBOUND_FAILURE", output)
-
     @patch('main.load_price_history')
     @patch('main.APP_CONFIG')
     def test_12_9_intraday_volatility_override(self, mock_config, mock_load_history):
@@ -1610,37 +1591,6 @@ class TestCategory12ProductionFailureProtection(unittest.TestCase):
             main.DATA_DIR = orig_data_dir
             shutil.rmtree(temp_dir)
 
-    @patch('main.get_repo_variable')
-    @patch('main.set_repo_variable')
-    @patch('main.smtplib.SMTP')
-    def test_12_11_send_daily_prompt_skip_if_ingested(self, mock_smtp, mock_set_var, mock_get_var):
-        # Set up a fake DATA_DIR for main
-        with patch('main.DATA_DIR', self.temp_dir):
-            tz = pytz.timezone('America/Chicago')
-            dt_735 = tz.localize(datetime(2026, 5, 22, 19, 35, 0)) # Friday
-            
-            # Scenario A: CSV exists and contains today's date "2026-05-22"
-            with open(self.csv_path, "w", encoding="utf-8") as f:
-                f.write("date,nymex_rb,nymex_ho,rack_u,rack_p,rack_d\n")
-                f.write("2026-05-22,2.10,2.20,2.30,2.40,2.50\n")
-                
-            # Call send_daily_prompt — it should see prices already ingested and skip (no get_repo_variable or set_repo_variable or SMTP should be called)
-            main.send_daily_prompt(dt_735)
-            mock_get_var.assert_not_called()
-            mock_set_var.assert_not_called()
-            mock_smtp.assert_not_called()
-            
-            # Scenario B: CSV exists but does NOT contain today's date (contains older date)
-            with open(self.csv_path, "w", encoding="utf-8") as f:
-                f.write("date,nymex_rb,nymex_ho,rack_u,rack_p,rack_d\n")
-                f.write("2026-05-21,2.10,2.20,2.30,2.40,2.50\n")
-                
-            mock_get_var.return_value = None # Not sent yet
-            
-            # Call send_daily_prompt — it should NOT skip and try to send SMS
-            main.send_daily_prompt(dt_735)
-            mock_get_var.assert_called_once()
-            mock_smtp.assert_called_once()
 
 
 class TestCategory13LiveValidationAndRobustness(unittest.TestCase):
@@ -2227,53 +2177,6 @@ class TestCategory18OperationalPricingRules(unittest.TestCase):
         # 10.0 * 0.50 = 5.00
         self.assertIn("Est. Realized Savings: +5.00¢/gal (at 50% same-day dispatch rate)", html_body)
 
-    def test_18_3_send_sms_suffixes(self):
-        import main
-        from unittest.mock import patch
-        from datetime import datetime
-        
-        all_data = {
-            'RB': {
-                'daily_pct': 2.0,
-                'current_price': 2.10,
-                'open_price': 2.00,
-                'high_price': 2.20,
-                'low_price': 1.95,
-                'yesterday_close': 2.00,
-                'rack_signal': {
-                    'action': 'BUY_NOW',
-                    'label': 'Hike likely',
-                    'change_cents': 10.0,
-                    'conviction': 'High Conviction'
-                }
-            }
-        }
-        
-        alert_context = {
-            'label': 'Final Verdict'
-        }
-        
-        with patch('main.TO_PHONE_SMS', ['1234567890@vtext.com']), \
-             patch('main.smtplib.SMTP') as mock_smtp:
-            instance = mock_smtp.return_value
-            main.send_sms(all_data, datetime.now(), alert_context)
-            
-            if instance.sendmail.called:
-                call_args = instance.sendmail.call_args[0]
-                msg_body = call_args[2]
-                import email
-                msg = email.message_from_string(msg_body)
-                payload = msg.get_payload(decode=True).decode('utf-8')
-                # New compact format: "Gas: BUY | High | +10.00c"
-                self.assertIn("Gas: BUY", payload)
-                self.assertIn("+10.00c", payload)
-                # Verbose dispatch instructions are email-only; must NOT appear in SMS
-                self.assertNotIn("Demand same-day load before midnight", payload)
-                self.assertNotIn("Confirm tank levels before waiting", payload)
-                # No emojis
-                self.assertNotIn("\u26a0\ufe0f", payload)
-                # Must fit in one carrier segment
-                self.assertLessEqual(len(payload), main.MAX_SMS_CHARS)
 
     @patch('main.get_repo_variable', return_value=None)
     def test_18_4_low_conviction_recommendation_text(self, mock_get_var):
@@ -2302,53 +2205,6 @@ class TestCategory18OperationalPricingRules(unittest.TestCase):
         signal = main.build_rack_signal('RB', data, now)
         self.assertEqual(signal['conviction'], 'Low Conviction')
         self.assertIn('Low Conviction — do not act on this signal unless inventory forces you to order regardless.', signal['text'])
-
-    def test_18_5_low_conviction_sms_suffix(self):
-        import main
-        from unittest.mock import patch
-        from datetime import datetime
-        
-        all_data = {
-            'RB': {
-                'daily_pct': 2.0,
-                'current_price': 2.10,
-                'open_price': 2.00,
-                'high_price': 2.20,
-                'low_price': 1.95,
-                'yesterday_close': 2.00,
-                'rack_signal': {
-                    'action': 'BUY_NOW',
-                    'label': 'Hike likely',
-                    'change_cents': 10.0,
-                    'conviction': 'Low Conviction'
-                }
-            }
-        }
-        
-        alert_context = {
-            'label': 'Final Verdict'
-        }
-        
-        with patch('main.TO_PHONE_SMS', ['1234567890@vtext.com']), \
-             patch('main.smtplib.SMTP') as mock_smtp:
-            instance = mock_smtp.return_value
-            main.send_sms(all_data, datetime.now(), alert_context)
-            
-            if instance.sendmail.called:
-                call_args = instance.sendmail.call_args[0]
-                msg_body = call_args[2]
-                import email
-                msg = email.message_from_string(msg_body)
-                payload = msg.get_payload(decode=True).decode('utf-8')
-                # New compact Low Conviction format: "Gas: BUY | LOW CONV — do not dispatch"
-                self.assertIn("Gas: BUY | LOW CONV", payload)
-                self.assertIn("do not dispatch", payload)
-                # Old verbose instruction must NOT appear in SMS (email only)
-                self.assertNotIn("inventory check only, do not dispatch based on this signal alone", payload)
-                # No emojis
-                self.assertNotIn("\u26a0\ufe0f", payload)
-                # Must fit in one carrier segment
-                self.assertLessEqual(len(payload), main.MAX_SMS_CHARS)
 
 
 
@@ -2405,27 +2261,6 @@ class TestCategory19EndToEndTuesdaySimulation(unittest.TestCase):
         self.assertIn("Est. Realized Savings: +2.00¢/gal (at 50% same-day dispatch rate)", html_body)
         self.assertIn("Low Conviction — do not act on this signal unless inventory forces you to order regardless.", html_body)
         self.assertNotIn("Operational Checklist & Dispatch Rules", html_body)
-        
-        # 3. Verify SMS body
-        with patch('main.TO_PHONE_SMS', ['1234567890@vtext.com']), \
-             patch('main.smtplib.SMTP') as mock_smtp:
-            instance = mock_smtp.return_value
-            main.send_sms(all_data, now, alert_context)
-            
-            if instance.sendmail.called:
-                call_args = instance.sendmail.call_args[0]
-                msg_body = call_args[2]
-                import email
-                msg = email.message_from_string(msg_body)
-                payload = msg.get_payload(decode=True).decode('utf-8')
-                # New compact Low Conviction format: "Gas: BUY | LOW CONV — do not dispatch"
-                self.assertIn("Gas: BUY | LOW CONV", payload)
-                self.assertIn("do not dispatch", payload)
-                # Old verbose instruction must NOT appear in SMS (email only)
-                self.assertNotIn("inventory check only, do not dispatch based on this signal alone", payload)
-                self.assertNotIn("⚠️", payload)
-                # Must fit in one carrier segment
-                self.assertLessEqual(len(payload), main.MAX_SMS_CHARS)
 
     @patch('main.get_repo_variable', return_value=None)
     def test_19_2_tuesday_high_conviction_simulation(self, mock_get_var):
@@ -2477,26 +2312,6 @@ class TestCategory19EndToEndTuesdaySimulation(unittest.TestCase):
         self.assertIn("Est. Realized Savings: +7.00¢/gal (at 50% same-day dispatch rate)", html_body)
         self.assertIn("Dispatch before the rack deadline if you need inventory.", html_body)
         self.assertNotIn("Operational Checklist & Dispatch Rules", html_body)
-        
-        # 3. Verify SMS body
-        with patch('main.TO_PHONE_SMS', ['1234567890@vtext.com']), \
-             patch('main.smtplib.SMTP') as mock_smtp:
-            instance = mock_smtp.return_value
-            main.send_sms(all_data, now, alert_context)
-            
-            if instance.sendmail.called:
-                call_args = instance.sendmail.call_args[0]
-                msg_body = call_args[2]
-                import email
-                msg = email.message_from_string(msg_body)
-                payload = msg.get_payload(decode=True).decode('utf-8')
-                # New compact High Conviction format: "Gas: BUY | High | +14.00c"
-                self.assertIn("Gas: BUY | High | +14.00c", payload)
-                # Old verbose instruction must NOT appear in SMS (email only)
-                self.assertNotIn("Demand same-day load before midnight", payload)
-                self.assertNotIn("⚠️", payload)
-                # Must fit in one carrier segment
-                self.assertLessEqual(len(payload), main.MAX_SMS_CHARS)
 
 
 class TestCategory20SecretMasking(unittest.TestCase):
@@ -2531,18 +2346,6 @@ class TestCategory20SecretMasking(unittest.TestCase):
             self.assertIn('re***t@example.com', masked)
             self.assertIn('us***r@example.com', masked)
 
-    def test_20_3_mask_sensitive_text_phone_masking(self):
-        """Verify that phone numbers are masked"""
-        with patch.dict(os.environ, {
-            'PHONE_SMS_ADDRESS': '+1234567890'
-        }):
-            test_text = "SMS sent to +1234567890"
-            masked = main.mask_sensitive_text(test_text)
-            # Full phone should not appear
-            self.assertNotIn('+1234567890', masked)
-            # Should have masked version
-            self.assertIn('***', masked)
-
     def test_20_4_mask_recipient_email(self):
         """Verify mask_recipient properly masks email addresses"""
         result = main.mask_recipient('john.doe@example.com')
@@ -2551,14 +2354,6 @@ class TestCategory20SecretMasking(unittest.TestCase):
         # Masking format: first 2 chars + *** + last char (before @)
         self.assertIn('jo***e', result)
         self.assertIn('@example.com', result)
-
-    def test_20_5_mask_recipient_phone(self):
-        """Verify mask_recipient properly masks phone numbers"""
-        result = main.mask_recipient('+14155552671')
-        # Should not have full phone
-        self.assertNotIn('+14155552671', result)
-        # Should have masked version
-        self.assertIn('***', result)
 
     def test_20_6_no_secrets_in_exception_logs(self):
         """Verify that exception messages don't expose secrets"""

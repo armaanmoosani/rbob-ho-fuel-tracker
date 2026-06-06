@@ -57,16 +57,6 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
-          PHONE_SMS_ADDRESS: ${{ secrets.PHONE_SMS_ADDRESS }}
           FORCE_VERDICT: ${{ github.event.inputs.force_verdict }}
         run: python main.py
 
-      - name: Send Failure SMS
-        if: failure()
-        env:
-          GMAIL_USER: ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          TO_EMAIL: ${{ secrets.TO_EMAIL }}
-          PHONE_SMS_ADDRESS: ${{ secrets.PHONE_SMS_ADDRESS }}
-        run: |
-          python -c "import main, datetime; main.send_sms({}, datetime.datetime.now(main.TZ), {'label': 'FAILURE', 'action': 'RBOB Fuel Tracker failed!'})" || echo "Failed to send SMS, but main.py may not be available"

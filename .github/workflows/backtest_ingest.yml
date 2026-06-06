@@ -34,7 +34,6 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
-          PHONE_SMS_ADDRESS: ${{ secrets.PHONE_SMS_ADDRESS }}
           GRAVES_EMAIL: ${{ secrets.GRAVES_EMAIL }}
           GRAVES_APP_PASSWORD: ${{ secrets.GRAVES_APP_PASSWORD }}
           SCHWAB_APP_KEY: ${{ secrets.SCHWAB_APP_KEY }}
@@ -51,12 +50,3 @@ jobs:
         run: |
           python ingest_prices.py
 
-      - name: Send Failure SMS
-        if: failure()
-        env:
-          GMAIL_USER: ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          TO_EMAIL: ${{ secrets.TO_EMAIL }}
-          PHONE_SMS_ADDRESS: ${{ secrets.PHONE_SMS_ADDRESS }}
-        run: |
-          python -c "import main, datetime; main.send_sms({}, datetime.datetime.now(main.TZ), {'label': 'FAILURE', 'action': 'Daily Ingestion & Backtest failed!'})"

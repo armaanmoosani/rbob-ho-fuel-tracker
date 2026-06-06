@@ -40,7 +40,6 @@ GMAIL_USER           = os.environ.get('GMAIL_USER', '')
 GMAIL_APP_PASSWORD   = os.environ.get('GMAIL_APP_PASSWORD', '')
 _to_email_raw        = os.environ.get('TO_EMAIL', '')
 TO_EMAIL             = [e.strip() for e in _to_email_raw.split(',') if e.strip()]
-TO_PHONE_SMS         = [p.strip() for p in os.environ.get('PHONE_SMS_ADDRESS', '').split(',') if p.strip()]
 
 import re
 import csv
@@ -73,7 +72,7 @@ def mask_sensitive_text(text):
     text = str(text)
     
     # Mask email/phone recipients
-    recipient_vars = ['GMAIL_USER', 'GRAVES_EMAIL', 'TO_EMAIL', 'PHONE_SMS_ADDRESS']
+    recipient_vars = ['GMAIL_USER', 'GRAVES_EMAIL', 'TO_EMAIL']
     sensitive_vals = []
     for env_var in recipient_vars:
         val = os.environ.get(env_var, '')
@@ -132,7 +131,6 @@ COMMODITIES = {
 
 REQUEST_TIMEOUT = 20
 MAX_GH_VARIABLE_VALUE_BYTES = 48 * 1024
-MAX_SMS_CHARS = 153
 TRUCK_GALLONS = 8500   # Standard truck load for dollar-value risk calculations
 
 # Load Config
@@ -1315,139 +1313,6 @@ def build_html_email(subject, all_data, now, alert_context):
     
     return html, cids
 
-def send_sms(all_data, now, alert_context):
-    """Send a compact SMS that fits in a single 153-char carrier segment.
-
-    The Gmail-to-SMS gateway splits messages at the 153-char per-segment
-    boundary (standard UDH multipart SMS) and only the first segment is
-    reliably delivered. Every branch below must produce a body that is
-    at most MAX_SMS_CHARS characters so that both RB and HO data are
-    always visible in the same message the user receives.
-    """
-    if not TO_PHONE_SMS:
-        return
-
-    label    = alert_context.get('label', 'Update')
-    latest_quote_time = now
-    quote_times = []
-    for prefix in ['RB', 'HO']:
-        if prefix in all_data and all_data[prefix].get('quote_time'):
-            quote_times.append(all_data[prefix]['quote_time'])
-    if quote_times:
-        latest_quote_time = max(quote_times)
-    time_str = latest_quote_time.astimezone(TZ).strftime('%-I:%M %p CT')
-
-    # --- HEARTBEAT / FAILURE: short fixed bodies ---
-    if alert_context.get('label') == 'HEARTBEAT':
-        body = f"HEARTBEAT {time_str}: Fuel Tracker active."
-    elif alert_context.get('label') == 'FAILURE':
-        action_desc = alert_context.get('action', 'Workflow failed. Check GHA logs.')
-        body = f"FAILURE {time_str}: {action_desc}"[:MAX_SMS_CHARS]
-
-    elif alert_context.get('label') == 'Final Verdict':
-        # Compact verdict: one line per commodity signal + one price line each.
-        # Format per signal:
-        #   Gas: BUY | High | +4.00c
-        #   Gas: BUY | LOW CONV — do not dispatch
-        lines = [f"[{time_str}] FINAL VERDICT"]
-        for prefix, short in [('RB', 'Gas'), ('HO', 'Diesel')]:
-            info = all_data.get(prefix)
-            if not info:
-                continue
-            sig = info.get('rack_signal')
-            if sig and sig.get('change_cents') is not None:
-                action = sig.get('action', '')
-                conv   = sig.get('conviction', '')
-                chg    = sig.get('change_cents', 0.0)
-                # Extract BUY / WAIT / NO EDGE keyword
-                if 'BUY' in action:
-                    kw = 'BUY'
-                elif 'WAIT' in action:
-                    kw = 'WAIT'
-                else:
-                    kw = sig.get('label', 'NO EDGE')
-                if conv == 'Low Conviction':
-                    lines.append(f"{short}: {kw} | LOW CONV — do not dispatch")
-                else:
-                    conv_short = conv.replace(' Conviction', '') if conv else ''
-                    lines.append(f"{short}: {kw} | {conv_short} | {chg:+.2f}c")
-        # Price summary — one compact line per commodity
-        for prefix, abbr in [('RB', 'Unleaded'), ('HO', 'Diesel')]:
-            info = all_data.get(prefix)
-            if not info:
-                continue
-            pct      = info.get('daily_pct')
-            price    = info.get('current_price')
-            if price is None:
-                continue
-            if pct is not None:
-                pct_sign = '+' if pct >= 0 else ''
-                lines.append(f"{abbr}: ${price:.4f} ({pct_sign}{pct:.2f}%)")
-            else:
-                lines.append(f"{abbr}: ${price:.4f}")
-        body = "\n".join(lines).strip()
-
-    else:
-        # PRICE ALERT, SETTLEMENT, RACK WINDOW, or generic UPDATE.
-        # Determine alert type label.
-        if 'Swing' in label or 'Movement' in label:
-            alert_type = 'PRICE ALERT'
-        elif 'Rack' in label:
-            alert_type = 'RACK WINDOW'
-        elif 'Settlement' in label:
-            alert_type = 'SETTLEMENT'
-        else:
-            alert_type = 'UPDATE'
-
-        lines = [f"[{time_str}] {alert_type}"]
-        # One compact line per commodity: Unleaded: $3.3351 (-3.44% | -$0.1188)
-        for prefix, abbr in [('RB', 'Unleaded'), ('HO', 'Diesel')]:
-            info = all_data.get(prefix)
-            if not info:
-                continue
-            price = info.get('current_price')
-            pct   = info.get('daily_pct')
-            if price is None:
-                continue
-            baseline = info.get('yesterday_close') or info.get('open_price')
-            if pct is not None and baseline is not None:
-                pct_sign  = '+' if pct >= 0 else ''
-                dollar_chg = price - baseline
-                sign       = '+' if dollar_chg >= 0 else '-'
-                lines.append(f"{abbr}: ${price:.4f} ({pct_sign}{pct:.2f}% | {sign}${abs(dollar_chg):.4f})")
-            elif pct is not None:
-                pct_sign = '+' if pct >= 0 else ''
-                lines.append(f"{abbr}: ${price:.4f} ({pct_sign}{pct:.2f}%)")
-            else:
-                lines.append(f"{abbr}: ${price:.4f}")
-        body = "\n".join(lines).strip()
-
-    # Hard guardrail: truncate to one carrier segment.
-    if len(body) > MAX_SMS_CHARS:
-        body = body[:MAX_SMS_CHARS].rstrip()
-
-    try:
-        srv = smtplib.SMTP('smtp.gmail.com', 587, timeout=30)
-        srv.starttls()
-        srv.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-        
-        phones = TO_PHONE_SMS
-        for phone in phones:
-            # Construct a fresh MIMEText per recipient — never mutate a shared
-            # MIME object across multiple sendmail() calls, as header state bleeds.
-            per_msg = MIMEText(body)
-            # Many carrier email-to-SMS/MMS gateways (AT&T, T-Mobile, Verizon)
-            # silently drop messages with an empty Subject line.  Use the alert
-            # label (already a short string) so the gateway has a non-empty subject.
-            per_msg['Subject'] = alert_context.get('label', 'Fuel Alert')
-            per_msg['From']    = GMAIL_USER
-            per_msg['To']      = phone
-            srv.sendmail(GMAIL_USER, phone, per_msg.as_string())
-            print(f"SMS sent to gateway ({mask_recipient(phone)})")
-            
-        srv.quit()
-    except Exception as e:
-        print(f"LOG_OUTBOUND_FAILURE: SMS send failed (non-fatal): {mask_sensitive_text(e)}")
 
 def send_email(subject, all_data, now, alert_context):
     try:
@@ -1489,7 +1354,6 @@ def send_email(subject, all_data, now, alert_context):
     except Exception as e:
         print(f"LOG_OUTBOUND_FAILURE: Email send failed: {mask_sensitive_text(e)}")
 
-    send_sms(all_data, now, alert_context)
 
 
 def send_once_today(key, subject, all_data, now, alert_context):
@@ -1508,61 +1372,6 @@ def send_once_today(key, subject, all_data, now, alert_context):
     except Exception as e:
         print(f"Warning: could not save lock {db_key}: {e}")
 
-def send_daily_prompt(now):
-    # Only run at 7:30 PM CT (19:30) on weekdays (and not on holidays)
-    if now.weekday() > 4 or not (now.hour == 19 and now.minute >= 30):
-        return
-    
-    if is_holiday(now):
-        print(f"Skipping daily price prompt on holiday ({now.astimezone(TZ).date()})")
-        return
-
-    # Check if today's prices have already been ingested to prevent duplicate prompts
-    today_str = now.date().isoformat()
-    csv_file = os.path.join(DATA_DIR, "graves_history.csv")
-    if os.path.exists(csv_file):
-        try:
-            with open(csv_file, "r") as f:
-                for line in f:
-                    parts = line.strip().split(',')
-                    if parts and parts[0] == today_str:
-                        print(f"Graves Oil prices for today ({today_str}) are already ingested. Skipping daily SMS prompt.")
-                        return
-        except Exception as e:
-            print(f"Warning: could not read graves_history.csv to check ingestion status: {e}")
-
-    session_str = get_session_date_str(now)
-    db_key = "SENT_DAILY_PROMPT"
-    
-    # Use repo variable checkpoint to ensure it only sends once
-    last_sent = get_repo_variable(db_key)
-    if last_sent == session_str:
-        return
-        
-    print("Time is 19:30 CT. Sending daily SMS price prompt...")
-    body = "Please reply with today's Graves Oil prices.\nFormat: Unleaded Premium Diesel\n(e.g. 2.10 2.30 2.50)"
-    
-    try:
-        srv = smtplib.SMTP('smtp.gmail.com', 587, timeout=30)
-        srv.starttls()
-        srv.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-        
-        phones = TO_PHONE_SMS
-        for phone in phones:
-            # Construct a fresh MIMEText per recipient — never mutate a shared object.
-            per_msg = MIMEText(body)
-            per_msg['Subject'] = 'Graves Oil Prices Needed'
-            per_msg['From']    = GMAIL_USER
-            per_msg['To']      = phone
-            srv.sendmail(GMAIL_USER, phone, per_msg.as_string())
-            print(f"Daily prompt sent to {mask_recipient(phone)}")
-            
-        srv.quit()
-        
-        # Checkpoint successful send
-        set_repo_variable(db_key, session_str)
-    except Exception as e:
-        print(f"LOG_OUTBOUND_FAILURE: Failed to send daily prompt: {mask_sensitive_text(e)}")
 
 def main():
     # Assert Chicago timezone is correctly recognized (Issue 10.1)
@@ -1698,7 +1507,6 @@ def main():
             'action_color': '#8b5cf6'
         }
         send_email("Final Verdict (On Demand): Exxon Price Predictor", all_data, now, alert_ctx)
-        send_sms(all_data, now, alert_ctx)
     elif local_now.hour == 14 and local_now.minute >= 35:
         attach_rack_signals(all_data, now)
         send_once_today('VERDICT_1435', "Final Verdict: Exxon Price Predictor", all_data, now, {
@@ -1730,8 +1538,6 @@ def main():
                 alert_ctx['morning_confirmation_html'] = confirm_html
                 
         send_once_today(f"UPDATE_{local_now.strftime('%H')}", f"Market Update — {local_now.strftime('%-I %p')}", all_data, now, alert_ctx)
-
-    send_daily_prompt(now)
 
     print(f"Total time: {(datetime.now(timezone.utc) - start_time).total_seconds():.1f}s")
 
