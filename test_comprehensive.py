@@ -1195,8 +1195,7 @@ class TestCategory12ProductionFailureProtection(unittest.TestCase):
     @patch('main.get_repo_variable')
     @patch('main.set_repo_variable')
     @patch('main.save_settlement_snapshots')
-    @patch('main.send_daily_prompt')
-    def test_12_1_timezone_runner_clock_drift(self, mock_prompt, mock_snapshots, mock_set, mock_get, mock_datetime):
+    def test_12_1_timezone_runner_clock_drift(self, mock_snapshots, mock_set, mock_get, mock_datetime):
         # 1. Mock runner clock at various CT times:
         # Timezone check behavior uses datetime.now(TZ)
         tz = pytz.timezone('America/Chicago')
