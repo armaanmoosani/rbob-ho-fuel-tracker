@@ -1674,6 +1674,8 @@ def resolve_active_schwab_symbol(prefix, now, access_token, candidate_months=4):
         except Exception as exc:
             print(f"[{prefix}] Schwab volume resolution failed: {exc}.")
 
+    print(f"[{prefix}] WARNING: Both yfinance underlyingSymbol and Schwab volume resolution failed. "
+          f"Falling back to math-based candidates[0]: {candidates[0]}. This may be the wrong contract during rollover week!")
     return candidates[0]
 
 

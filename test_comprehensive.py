@@ -1361,9 +1361,12 @@ class TestCategory12ProductionFailureProtection(unittest.TestCase):
             'dummy_token'
         )
 
-        # With zero activity for all, must pick /RBM26 (nearest/index 0), not /RBU26 (furthest/index 3)
-        # This naturally aligns with trader/Thinkorswim active contract (near-term gets liquidity)
-        self.assertEqual(resolved, '/RBM26', "Bug regression: should pick nearest contract on activity tie")
+        # With zero activity for all, volume fallback is bypassed (< 100 threshold).
+        # Falls through to math-based candidates[0].  Session date is May 27 (17:00 UTC =
+        # dt.hour >= 17 triggers +1 day in get_session_date_str).  May 27 is within the
+        # 3-business-day early-roll window before the May 30 LTD for RBM26, so the math
+        # correctly advances to the July contract (RBN26) as candidates[0].
+        self.assertEqual(resolved, '/RBN26', "With early_roll_days=3, May 27 session is in the roll window — should advance to July")
 
 
     @patch('main.yf.Ticker')
@@ -2078,14 +2081,32 @@ class TestCategory17ContractCalendar(unittest.TestCase):
     def test_17_2_get_front_month_contract_roll(self):
         import futures_util
         from datetime import date
+
+        # April 30, 2025 = mathematical LTD for the May RB contract.
+        # With early_roll_days=3, the effective roll date is ~3 biz days before (≈ April 25).
+        # On the LTD itself the market has already conventionally rolled → expect June contract.
         dt_expiry = date(2025, 4, 30)
         cyear, cmonth, ltd = futures_util.get_front_month_contract(dt_expiry, 'RB')
-        self.assertEqual((cyear, cmonth), (2025, 5))
-        self.assertEqual(ltd, date(2025, 4, 30))
-        
+        self.assertEqual((cyear, cmonth), (2025, 6),
+            "On the mathematical LTD the market has already rolled to the next contract")
+
+        # One day after the LTD also expects June.
         dt_after = date(2025, 5, 1)
         cyear_after, cmonth_after, ltd_after = futures_util.get_front_month_contract(dt_after, 'RB')
         self.assertEqual((cyear_after, cmonth_after), (2025, 6))
+
+        # Well before the early-roll window (e.g. April 1, 2025) should still show May contract.
+        dt_early = date(2025, 4, 1)
+        cyear_early, cmonth_early, ltd_early = futures_util.get_front_month_contract(dt_early, 'RB')
+        self.assertEqual((cyear_early, cmonth_early), (2025, 5),
+            "Well before the roll window should still target the current front-month")
+
+        # Bypass early-roll by passing early_roll_days=0 to get the raw math boundary.
+        dt_exact = date(2025, 4, 30)
+        cyear_raw, cmonth_raw, ltd_raw = futures_util.get_front_month_contract(dt_exact, 'RB', early_roll_days=0)
+        self.assertEqual((cyear_raw, cmonth_raw), (2025, 5),
+            "With early_roll_days=0 the LTD itself should still be in-contract")
+        self.assertEqual(ltd_raw, date(2025, 4, 30))
 
     def test_17_3_nymex_holidays_2024_2025(self):
         import futures_util

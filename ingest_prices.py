@@ -370,7 +370,6 @@ def get_thinkorswim_settlement(target_date_str):
             import base64
             import requests
             from datetime import datetime as _dt
-            from futures_util import get_front_month_schwab_symbol
             auth_header = base64.b64encode(f"{SCHWAB_APP_KEY}:{SCHWAB_APP_SECRET}".encode()).decode()
             token_res = requests.post(
                 "https://api.schwabapi.com/v1/oauth/token",
@@ -382,13 +381,34 @@ def get_thinkorswim_settlement(target_date_str):
             token_json = token_res.json()
             access_token = token_json.get('access_token')
             if access_token:
-                # Resolve front-month Schwab symbols for RB and HO using the target date
+                # Resolve the front-month Schwab symbols using market-convention first
+                # (yfinance underlyingSymbol), then fall back to math-based LTD schedule.
+                # The math-based approach lags the real market roll by 3-5 weeks, causing
+                # wrong-contract settlement prices to be stored during the rollover window.
                 try:
                     dt_target = _dt.fromisoformat(target_date_str)
                 except Exception:
                     dt_target = _dt.now()
-                rb_sym = get_front_month_schwab_symbol(dt_target, 'RB')
-                ho_sym = get_front_month_schwab_symbol(dt_target, 'HO')
+
+                def _resolve_ingest_symbol(prefix):
+                    """Resolve front-month contract symbol: yfinance first, math fallback."""
+                    from futures_util import get_front_month_schwab_symbol
+                    import yfinance as _yf
+                    yf_root = "RB=F" if prefix == "RB" else "HO=F"
+                    try:
+                        underlying = _yf.Ticker(yf_root).info.get('underlyingSymbol')
+                        if underlying and underlying.startswith(prefix):
+                            resolved = '/' + underlying.split('.')[0]
+                            print(f"[ingest] {prefix} front-month resolved via yfinance underlyingSymbol: {resolved}")
+                            return resolved
+                    except Exception as _yf_err:
+                        print(f"[ingest] {prefix} yfinance underlyingSymbol lookup failed: {_yf_err}. Using math fallback.")
+                    math_sym = get_front_month_schwab_symbol(dt_target, prefix)
+                    print(f"[ingest] {prefix} front-month resolved via math fallback: {math_sym}")
+                    return math_sym
+
+                rb_sym = _resolve_ingest_symbol('RB')
+                ho_sym = _resolve_ingest_symbol('HO')
 
                 # Use pricehistory endpoint to get historical daily candles
                 rb_val = None

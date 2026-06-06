@@ -113,7 +113,15 @@ def contract_last_trade_date(contract_year, contract_month, prefix):
         return crude_last_trade_date(contract_year, contract_month)
     raise ValueError(f"Unsupported futures prefix: {prefix}")
 
-def get_front_month_contract(dt, prefix):
+def get_front_month_contract(dt, prefix, early_roll_days=3):
+    """Return (contract_year, contract_month, ltd) for the active front-month contract.
+
+    early_roll_days: number of NYMEX business days before the mathematical LTD at which
+    the contract is considered rolled.  CME energy markets (RB, HO) conventionally trade
+    the back month as the active contract 3-5 business days before the mathematical LTD.
+    Setting this to 3 keeps the math fallback aligned with market convention during the
+    rollover window.  The primary resolution (yfinance underlyingSymbol) overrides this.
+    """
     if isinstance(dt, datetime):
         today = dt.date()
     else:
@@ -121,7 +129,17 @@ def get_front_month_contract(dt, prefix):
     contract_year, contract_month = add_month(today.year, today.month, 1)
     for _ in range(24):
         ltd = contract_last_trade_date(contract_year, contract_month, prefix)
-        if today <= ltd:
+        # Check if today is within early_roll_days business days of the LTD.
+        # Count back early_roll_days business days from the LTD to get the effective roll date.
+        effective_roll_date = ltd
+        days_back = 0
+        candidate = ltd
+        while days_back < early_roll_days:
+            candidate -= timedelta(days=1)
+            if is_nymex_business_day(candidate):
+                days_back += 1
+        effective_roll_date = candidate  # first day of the early-roll window
+        if today <= effective_roll_date:
             return contract_year, contract_month, ltd
         contract_year, contract_month = add_month(contract_year, contract_month, 1)
     raise RuntimeError(f"Could not resolve front-month contract for {prefix}")
