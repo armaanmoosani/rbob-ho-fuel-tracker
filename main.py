@@ -1592,7 +1592,12 @@ def resolve_active_schwab_symbol(prefix, now, access_token, candidate_months=4):
         return None
 
     def quote_activity(quote):
-        return quote_float(quote, 'volume', 'volumeDay', 'totalVolume', 'openInterest') or 0.0
+        # Use open interest as the primary metric — this matches ThinkorSwim's algorithm
+        # for rolling its continuous /RB, /HO, /CL symbols.  During the roll window the
+        # next month gains daily volume first, but the current month retains the majority
+        # of outstanding positions (open interest) until the true crossover.  Daily volume
+        # is used as a fallback only when OI is not reported (e.g. overnight sessions).
+        return quote_float(quote, 'openInterest', 'totalVolume', 'volume', 'volumeDay') or 0.0
 
     # Use the CME Globex session date (not raw calendar date) for contract resolution.
     # After 5 PM CT, the session has already rolled to the next calendar day, so
@@ -1755,20 +1760,20 @@ def fetch_commodity(prefix, cfg, now, access_token):
                     )
                     if not _qe:
                         continue
-                    _vol = float(next((float(_qe[k]) for k in ('volume','volumeDay','totalVolume','openInterest') if _qe.get(k) and float(_qe[k]) > 0), 0.0))
+                    _vol = float(next((float(_qe[k]) for k in ('openInterest','totalVolume','volume','volumeDay') if _qe.get(k) and float(_qe[k]) > 0), 0.0))
                     if _sym == cached_symbol:
                         _cached_vol = _vol
                     if _vol > _best_vol:
                         _best_vol = _vol
                         _best_sym = _sym
-                # Invalidate cache if a different contract has strictly higher volume
-                # AND the margin is not just overnight noise (cached_vol == 0 is definitive)
+                # Invalidate cache if a different contract has strictly higher open interest
+                # AND the margin is not just overnight noise (cached_val == 0 is definitive)
                 if _best_sym and _best_sym != cached_symbol and _best_vol > _cached_vol:
-                    print(f"[{prefix}] Cache invalid: cached {cached_symbol} (vol={_cached_vol:.0f}) "
-                          f"but Schwab volume says {_best_sym} (vol={_best_vol:.0f}) is the front month. Re-resolving.")
+                    print(f"[{prefix}] Cache invalid: cached {cached_symbol} (OI={_cached_vol:.0f}) "
+                          f"but Schwab open interest says {_best_sym} (OI={_best_vol:.0f}) is the front month. Re-resolving.")
                     cache_is_valid = False
                 else:
-                    print(f"[{prefix}] Cache validated by Schwab volume: {cached_symbol} (vol={_cached_vol:.0f})")
+                    print(f"[{prefix}] Cache validated by Schwab open interest: {cached_symbol} (OI={_cached_vol:.0f})")
             except Exception as _ve:
                 print(f"[{prefix}] Cache validation skipped (Schwab unavailable): {_ve}")
 
