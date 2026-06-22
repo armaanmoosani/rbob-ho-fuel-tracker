@@ -2288,37 +2288,44 @@ class TestCategory19EndToEndTuesdaySimulation(unittest.TestCase):
         import pytz
         from datetime import datetime
         from unittest.mock import patch
-        
+
         # Simulating Tuesday afternoon at 2:35 PM CT
         tz_chicago = pytz.timezone('America/Chicago')
         now = datetime(2026, 5, 26, 14, 35, 0, tzinfo=tz_chicago)
-        
-        # Synthetic data with +14.0 move
-        # nymex_daily_std is 8.9551, so Z-score = 14.0 / 8.9551 = 1.56 (>= 1.5 -> High Conviction)
+
+        # Synthetic data with +21.0¢ move (~2× the highest expected nymex_daily_std).
+        # We freeze nymex_daily_std to 8.9551 via APP_CONFIG so this test is not
+        # fragile against auto-tuner recalibration: Z = 21.0 / 8.9551 = 2.35 >> 1.5.
+        # Even if the auto-tuner raises std to ~13c, Z = 21/13 = 1.61 still >= 1.5.
         rb_data = {
-            'current_price': 2.14,
+            'current_price': 2.21,
             'open_price': 2.00,
-            'high_price': 2.18,
+            'high_price': 2.25,
             'low_price': 1.99,
-            'daily_pct': 7.0,
+            'daily_pct': 10.5,
             'yesterday_close': 2.00,
-            'five_day_high': 2.20,
+            'five_day_high': 2.25,
             'five_day_low': 1.95,
             'thirty_day_avg': 2.00,
             'chart_intraday_b64': 'mock_intra',
             'chart_5d_b64': 'mock_5d',
             'schwab_symbol': 'test_symbol'
         }
-        
-        # 1. Generate signal
-        signal = main.build_rack_signal('RB', rb_data, now)
+
+        # Freeze APP_CONFIG so nymex_daily_std is deterministic for this test
+        frozen_config = dict(main.APP_CONFIG)
+        frozen_config['RB_nymex_daily_std'] = 8.9551
+        with patch.object(main, 'APP_CONFIG', frozen_config):
+            # 1. Generate signal
+            signal = main.build_rack_signal('RB', rb_data, now)
         self.assertEqual(signal['action'], 'BUY_NOW')
         self.assertEqual(signal['conviction'], 'High Conviction')
-        self.assertAlmostEqual(signal['change_cents'], 14.0, places=4)
+        self.assertAlmostEqual(signal['change_cents'], 21.0, places=4)
         self.assertEqual(
             signal['text'].split(". ")[-1],
             'Dispatch before the rack deadline if you need inventory.'
         )
+
         
         # 2. Verify HTML verdict email
         all_data = {'RB': rb_data}
@@ -2329,7 +2336,7 @@ class TestCategory19EndToEndTuesdaySimulation(unittest.TestCase):
         
         self.assertNotIn("⚠️", html_body)
         self.assertIn("UNLEADED HIKE LIKELY:", html_body)
-        self.assertIn("Est. Realized Savings: +7.00¢/gal (at 50% same-day dispatch rate)", html_body)
+        self.assertIn("Est. Realized Savings: +10.50¢/gal (at 50% same-day dispatch rate)", html_body)
         self.assertIn("Dispatch before the rack deadline if you need inventory.", html_body)
         self.assertNotIn("Operational Checklist & Dispatch Rules", html_body)
 
