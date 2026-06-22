@@ -1612,28 +1612,15 @@ def resolve_active_schwab_symbol(prefix, now, access_token, candidate_months=4):
         candidates.append(f"/{prefix}{DELIVERY_MONTH_CODES[cmonth]}{cyear % 100:02d}")
 
     # ── Resolution strategy ──────────────────────────────────────────────────
-    # 1. PRIMARY: yfinance underlyingSymbol  (tracks market-convention roll;
-    #    matches what thinkorswim and Yahoo Finance show as the front month,
-    #    which typically occurs 3–5 weeks before the mathematical LTD).
-    # 2. FALLBACK: Schwab live-quote volume  (pick the candidate with the
-    #    highest real-time activity; used when yfinance is unavailable).
-    # 3. LAST RESORT: candidates[0]  (first contract in our session-adjusted
-    #    candidate list).
+    # 1. PRIMARY: Schwab live-quote volume  — same infrastructure as ThinkorSwim;
+    #    picks the candidate with the highest real-time activity so the resolved
+    #    contract always matches what ThinkorSwim shows as the front month.
+    # 2. FALLBACK: yfinance underlyingSymbol  — used when Schwab token is expired;
+    #    Yahoo Finance rolls its continuous symbol on its own schedule which can
+    #    differ from CME convention, so it is secondary to Schwab.
+    # 3. LAST RESORT: candidates[0]  (first contract in our session-adjusted list).
 
-    # 1. Try yfinance underlyingSymbol first
-    try:
-        yf_symbol = "RB=F" if prefix == "RB" else "HO=F" if prefix == "HO" else "CL=F"
-        yf_ticker = yf.Ticker(yf_symbol, session=_YF_SESSION)
-        underlying = yf_ticker.info.get('underlyingSymbol')
-        if underlying:
-            resolved_symbol = '/' + underlying.split('.')[0]
-            if resolved_symbol.startswith(f"/{prefix}"):
-                print(f"[{prefix}] Resolved active Schwab symbol from yfinance underlyingSymbol (primary): {resolved_symbol}")
-                return resolved_symbol
-    except Exception as yf_err:
-        print(f"[{prefix}] yfinance underlyingSymbol lookup failed: {yf_err}. Falling back to Schwab volume.")
-
-    # 2. Schwab live-quote volume fallback
+    # 1. Schwab live-quote volume (primary — matches ThinkorSwim)
     if access_token:
         try:
             symbols = ",".join(candidates)
@@ -1647,7 +1634,8 @@ def resolve_active_schwab_symbol(prefix, now, access_token, candidate_months=4):
             res_json = res.json()
 
             best_symbol = None
-            best_score = (-1, -1.0, float('inf'))
+            best_volume = -1.0
+            best_idx = float('inf')
             for idx, symbol in enumerate(candidates):
                 quote_entry = None
                 if symbol in res_json:
@@ -1659,22 +1647,36 @@ def resolve_active_schwab_symbol(prefix, now, access_token, candidate_months=4):
                     )
                 if not quote_entry:
                     continue
-                score = float(quote_activity(quote_entry))
-                candidate_score = (1, score, -idx)
-                if candidate_score > best_score:
-                    best_score = candidate_score
+                vol = float(quote_activity(quote_entry))
+                # Pick highest volume; break ties by preferring the nearest contract (lowest idx)
+                if vol > best_volume or (vol == best_volume and idx < best_idx):
+                    best_volume = vol
+                    best_idx = idx
                     best_symbol = symbol
 
             if best_symbol:
-                if best_score[1] >= 100:
-                    print(f"[{prefix}] Resolved active Schwab symbol from live quotes (fallback): {best_symbol} (volume: {best_score[1]:.0f})")
-                    return best_symbol
-                else:
-                    print(f"[{prefix}] Schwab volume fallback bypassed: max volume {best_score[1]:.0f} is below threshold of 100.")
+                # Accept any candidate that has non-zero activity, OR the nearest candidate
+                # when all are zero (thin overnight market — nearest = most liquid by convention).
+                print(f"[{prefix}] Resolved active Schwab symbol from live Schwab volume (primary): "
+                      f"{best_symbol} (volume: {best_volume:.0f})")
+                return best_symbol
         except Exception as exc:
-            print(f"[{prefix}] Schwab volume resolution failed: {exc}.")
+            print(f"[{prefix}] Schwab volume resolution failed: {exc}. Falling back to yfinance.")
 
-    print(f"[{prefix}] WARNING: Both yfinance underlyingSymbol and Schwab volume resolution failed. "
+    # 2. yfinance underlyingSymbol (fallback — used when Schwab token is expired)
+    try:
+        yf_symbol = "RB=F" if prefix == "RB" else "HO=F" if prefix == "HO" else "CL=F"
+        yf_ticker = yf.Ticker(yf_symbol, session=_YF_SESSION)
+        underlying = yf_ticker.info.get('underlyingSymbol')
+        if underlying:
+            resolved_symbol = '/' + underlying.split('.')[0]
+            if resolved_symbol.startswith(f"/{prefix}"):
+                print(f"[{prefix}] Resolved active Schwab symbol from yfinance underlyingSymbol (fallback): {resolved_symbol}")
+                return resolved_symbol
+    except Exception as yf_err:
+        print(f"[{prefix}] yfinance underlyingSymbol lookup failed: {yf_err}.")
+
+    print(f"[{prefix}] WARNING: Both Schwab volume and yfinance underlyingSymbol resolution failed. "
           f"Falling back to math-based candidates[0]: {candidates[0]}. This may be the wrong contract during rollover week!")
     return candidates[0]
 
@@ -1846,7 +1848,9 @@ def fetch_commodity(prefix, cfg, now, access_token):
     yesterday_close = None
     five_day_high = five_day_low = thirty_day_avg = sma_3 = sma_10 = None
     history_5d = []
-    # Prioritize graves_history.csv daily settlements for yesterday_close and compute fallback stats
+    csv_yesterday_close = None
+    # Read CSV for historical stats (SMA, range) — but NOT as the daily baseline
+    # when Schwab data is available, to avoid cross-contract comparison after a roll.
     try:
         col_idx = 1 if prefix == "RB" else 2
         csv_file_path = os.path.join(DATA_DIR, "graves_history.csv")
@@ -1870,12 +1874,12 @@ def fetch_commodity(prefix, cfg, now, access_token):
                                 pass
             if hist_records:
                 hist_records.sort(key=lambda x: x[0])
-                best_date, yesterday_close = hist_records[-1]
-                print(f"[{prefix}] Prioritized yesterday_close from local CSV (date: {best_date}): {yesterday_close}")
-                
-                # Extract clean list of prices
+                best_date, csv_yesterday_close = hist_records[-1]
+                print(f"[{prefix}] CSV last settlement (date: {best_date}): {csv_yesterday_close}")
+
+                # Extract clean list of prices for rolling stats
                 hist_prices = [x[1] for x in hist_records]
-                
+
                 # Set fallback statistics in case yfinance fails
                 thirty_day_avg = float(sum(hist_prices[-30:]) / len(hist_prices[-30:]))
                 if len(hist_prices) >= 3:
@@ -1885,11 +1889,24 @@ def fetch_commodity(prefix, cfg, now, access_token):
                 five_day_high = float(max(hist_prices[-5:]))
                 five_day_low  = float(min(hist_prices[-5:]))
     except Exception as e:
-        print(f"[{prefix}] Failed to read statistics fallback from CSV: {e}")
+        print(f"[{prefix}] Failed to read statistics from CSV: {e}")
 
-    # Fallback to Schwab close price if CSV not found/empty
-    if yesterday_close is None and data_source == 'schwab' and schwab_close > 0:
+    # Determine yesterday_close — prefer Schwab's contract-specific closePrice when
+    # Schwab is the data source.  Schwab closePrice is the prior-session settlement
+    # for the exact contract being tracked, so it is always safe across rolls.
+    # The CSV is NOT contract-aware: after a roll it still holds the old month's
+    # settlements, creating a cross-contract comparison that produces false % swings.
+    if data_source == 'schwab' and schwab_close > 0:
         yesterday_close = schwab_close
+        if csv_yesterday_close and abs(csv_yesterday_close - schwab_close) > 0.05:
+            print(f"[{prefix}] Using Schwab contract-specific closePrice ({schwab_close:.4f}) "
+                  f"as yesterday_close. CSV had {csv_yesterday_close:.4f} "
+                  f"(likely from prior contract month — ignoring to prevent cross-contract comparison).")
+        else:
+            print(f"[{prefix}] Using Schwab contract-specific closePrice ({schwab_close:.4f}) as yesterday_close.")
+    elif csv_yesterday_close is not None:
+        yesterday_close = csv_yesterday_close
+        print(f"[{prefix}] Using CSV yesterday_close ({yesterday_close:.4f}) — Schwab close not available.")
         
     try:
         yf_t = yf.Ticker(dynamic_yf_symbol, session=_YF_SESSION)
