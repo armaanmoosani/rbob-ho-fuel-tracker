@@ -1725,8 +1725,64 @@ def fetch_commodity(prefix, cfg, now, access_token):
             except Exception as _e:
                 print(f"[{prefix}] Warning: symbol-continuity check failed in fetch_commodity: {_e}")
     if cached_symbol and not on_roll_day:
-        schwab_symbol = cached_symbol
-        print(f"[{prefix}] Using cached active symbol for session {session_str}: {schwab_symbol}")
+        # Validate the cached symbol against live Schwab volume before trusting it.
+        # The cache may have been written by an older resolver (yfinance-primary) that
+        # picked the wrong contract.  If Schwab volume now clearly points to a different
+        # contract, discard the stale cache and re-resolve.
+        cache_is_valid = True
+        if access_token:
+            try:
+                from datetime import date as _date_type
+                _session_date = _date_type.fromisoformat(session_str)
+                _cy, _cm, _ = get_front_month_contract(_session_date, prefix)
+                _candidates = []
+                for _i in range(4):
+                    _cyy, _cmm = add_month(_cy, _cm, _i)
+                    _candidates.append(f"/{prefix}{DELIVERY_MONTH_CODES[_cmm]}{_cyy % 100:02d}")
+                _res = requests.get(
+                    "https://api.schwabapi.com/marketdata/v1/quotes",
+                    params={"symbols": ",".join(_candidates)},
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    timeout=10
+                )
+                _res.raise_for_status()
+                _rj = _res.json()
+                _best_sym, _best_vol, _cached_vol = None, -1.0, 0.0
+                for _idx, _sym in enumerate(_candidates):
+                    _qe = _rj.get(_sym, {}).get('quote') or next(
+                        (v.get('quote') for v in _rj.values() if isinstance(v, dict) and v.get('quote', {}).get('symbol') == _sym),
+                        None
+                    )
+                    if not _qe:
+                        continue
+                    _vol = float(next((float(_qe[k]) for k in ('volume','volumeDay','totalVolume','openInterest') if _qe.get(k) and float(_qe[k]) > 0), 0.0))
+                    if _sym == cached_symbol:
+                        _cached_vol = _vol
+                    if _vol > _best_vol:
+                        _best_vol = _vol
+                        _best_sym = _sym
+                # Invalidate cache if a different contract has strictly higher volume
+                # AND the margin is not just overnight noise (cached_vol == 0 is definitive)
+                if _best_sym and _best_sym != cached_symbol and _best_vol > _cached_vol:
+                    print(f"[{prefix}] Cache invalid: cached {cached_symbol} (vol={_cached_vol:.0f}) "
+                          f"but Schwab volume says {_best_sym} (vol={_best_vol:.0f}) is the front month. Re-resolving.")
+                    cache_is_valid = False
+                else:
+                    print(f"[{prefix}] Cache validated by Schwab volume: {cached_symbol} (vol={_cached_vol:.0f})")
+            except Exception as _ve:
+                print(f"[{prefix}] Cache validation skipped (Schwab unavailable): {_ve}")
+
+        if cache_is_valid:
+            schwab_symbol = cached_symbol
+            print(f"[{prefix}] Using cached active symbol for session {session_str}: {schwab_symbol}")
+        else:
+            schwab_symbol = resolve_active_schwab_symbol(prefix, now, access_token)
+            state[cache_key] = schwab_symbol
+            try:
+                save_alert_state(state)
+                print(f"[{prefix}] Re-resolved and cached active symbol for session {session_str}: {schwab_symbol}")
+            except Exception as e:
+                print(f"Warning: could not save active symbol to alert state: {e}")
     else:
         if on_roll_day:
             print(f"[{prefix}] Session roll day — bypassing stale cache and re-resolving by live Schwab volume.")
@@ -1737,6 +1793,7 @@ def fetch_commodity(prefix, cfg, now, access_token):
             print(f"[{prefix}] Resolved and cached active symbol for session {session_str}: {schwab_symbol}")
         except Exception as e:
             print(f"Warning: could not save active symbol to alert state: {e}")
+
             
     dynamic_yf_symbol = schwab_to_yfinance_symbol(schwab_symbol)
     print(f"[{prefix}] Targeting front-month: Schwab {schwab_symbol} | yf {dynamic_yf_symbol}")
