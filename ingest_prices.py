@@ -326,17 +326,44 @@ def get_github_settlement_snapshots(target_date_str):
         ho_res = requests.get(ho_url, headers=headers, timeout=10)
         
         rb_val, ho_val = None, None
-        
+
+        def _expected_front_month(prefix, date_str):
+            """Return the expected front-month Schwab symbol for the given session date."""
+            try:
+                from futures_util import get_front_month_contract, DELIVERY_MONTH_CODES
+                from datetime import date as _d
+                d = _d.fromisoformat(date_str)
+                yr, mo, _ = get_front_month_contract(d, prefix)
+                return f"/{prefix}{DELIVERY_MONTH_CODES[mo]}{yr % 100:02d}"
+            except Exception:
+                return None
+
         if rb_res.status_code == 200:
             rb_snap = json.loads(rb_res.json().get("value", "{}"))
             if rb_snap.get("date") == target_date_str:
-                rb_val = float(rb_snap["price"])
-                
+                snap_sym = rb_snap.get("schwab_symbol", "")
+                expected_sym = _expected_front_month("RB", target_date_str)
+                if expected_sym and snap_sym and snap_sym != expected_sym:
+                    print(f"[RB] GitHub variable snapshot was written for {snap_sym} but expected "
+                          f"{expected_sym}. Rejecting stale contract snapshot — will fall back to yfinance.")
+                else:
+                    rb_val = float(rb_snap["price"])
+                    if snap_sym:
+                        print(f"[RB] GitHub variables success: {snap_sym} price={rb_val}")
+
         if ho_res.status_code == 200:
             ho_snap = json.loads(ho_res.json().get("value", "{}"))
             if ho_snap.get("date") == target_date_str:
-                ho_val = float(ho_snap["price"])
-                
+                snap_sym = ho_snap.get("schwab_symbol", "")
+                expected_sym = _expected_front_month("HO", target_date_str)
+                if expected_sym and snap_sym and snap_sym != expected_sym:
+                    print(f"[HO] GitHub variable snapshot was written for {snap_sym} but expected "
+                          f"{expected_sym}. Rejecting stale contract snapshot — will fall back to yfinance.")
+                else:
+                    ho_val = float(ho_snap["price"])
+                    if snap_sym:
+                        print(f"[HO] GitHub variables success: {snap_sym} price={ho_val}")
+
         if rb_val is not None and ho_val is not None:
             return {
                 "date": target_date_str,
@@ -350,6 +377,7 @@ def get_github_settlement_snapshots(target_date_str):
         print(f"Failed to fetch settlement snapshots from GitHub variables: {e}")
         
     return None
+
 
 
 def get_thinkorswim_settlement(target_date_str):
