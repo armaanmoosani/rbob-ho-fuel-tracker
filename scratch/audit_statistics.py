@@ -143,7 +143,7 @@ def run_audit():
         "RB_DROP_THRESHOLD_CENTS": -1.0,
         "RB_nymex_daily_std": 1.0,
         "RB_historical_win_rate": 0.70,
-        "RB_historical_cvar": 3.0,
+        "RB_wait_upside_cvar_95": 3.0,
         "RB_average_savings": 0.0,
         "RB_window_days": 120
     }

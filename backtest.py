@@ -209,9 +209,9 @@ def run_optimization(df, nymex_col, rack_col, prefix, cfg):
     df['delta_nymex'] = df[nymex_col].diff() * 100
     df['delta_rack'] = df[rack_col].diff() * 100
 
-    windows = [120, 180, 240]
-    hike_percentiles = [15, 20]
-    drop_percentiles = [80, 85]
+    windows = [90, 120, 180, 240]
+    hike_percentiles = [10, 15, 20, 25]
+    drop_percentiles = [75, 80, 85, 90]
 
     best_median_savings = -9999.0
     best_params = None
@@ -405,7 +405,7 @@ def run_optimization(df, nymex_col, rack_col, prefix, cfg):
     # Save metrics to config
     cfg[f"{prefix}_nymex_daily_std"] = round(nymex_std, 4)
     cfg[f"{prefix}_historical_win_rate"] = round(win_rate, 4)
-    cfg[f"{prefix}_historical_cvar"] = round(cvar_val, 4)
+    cfg[f"{prefix}_wait_upside_cvar_95"] = round(cvar_val, 4)
     cfg[f"{prefix}_average_savings"] = round(avg_savings, 4)
     cfg[f"{prefix}_window_days"] = opt_W
     cfg[f"{prefix}_opt_Hp"] = opt_Hp

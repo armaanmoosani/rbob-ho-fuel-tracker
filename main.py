@@ -672,10 +672,10 @@ def build_rack_signal(prefix, data, now):
             f"(Multi-year baseline range: {baseline_range}; operational planning floor: {floor})."
         )
     elif "WAIT" in action:
-        cvar = APP_CONFIG.get(f"{prefix}_historical_cvar", 3.0)
+        cvar = APP_CONFIG.get(f"{prefix}_wait_upside_cvar_95", APP_CONFIG.get(f"{prefix}_historical_cvar", 3.0))
         cvar_truck_dollars = (cvar / 100.0) * TRUCK_GALLONS
         risk_text = (
-            f"Risk Note: On the worst 5% of WAIT-signal days historically, rack prices spiked "
+            f"Risk Note: On the worst 5% of WAIT-signal days historically, rack prices rose "
             f"+{cvar:.2f}¢/gal (+${cvar_truck_dollars:,.0f} per {TRUCK_GALLONS:,}-gallon truck). "
             f"Defer purchase only if inventory capacity allows."
         )
@@ -915,30 +915,7 @@ def build_html_block(prefix, info, now):
     else:
         fiveday_section = ''
 
-    sma3 = info.get('sma_3')
-    sma10 = info.get('sma_10')
     momentum_html = ""
-    if sma3 and sma10:
-        if sma3 > sma10:
-            mom_color = "#22c55e"
-            mom_text = "BULLISH (Consider Buying)"
-            mom_desc = "Short-term momentum is actively pushing prices up."
-        else:
-            mom_color = "#ef4444"
-            mom_text = "BEARISH (Consider Waiting)"
-            mom_desc = "Short-term momentum is actively pushing prices down."
-            
-        momentum_html = f'''
-    <!-- MOMENTUM BAR -->
-    <div style="background:#f8fafc;padding:12px 20px 14px;border-left:1px solid #e2e8f0;border-right:1px solid #e2e8f0;border-top:1px solid #e2e8f0;">
-      <table width="100%" cellpadding="0" cellspacing="0">
-        <tr>
-          <td><p style="margin:0;font-size:10px;color:#64748b;text-transform:uppercase;font-weight:700;">Momentum Trend</p></td>
-          <td style="text-align:right;"><p style="margin:0;font-size:12px;color:{mom_color};font-weight:700;">{mom_text}</p></td>
-        </tr>
-      </table>
-      <p style="margin:4px 0 0;font-size:9px;color:#94a3b8;font-style:italic;">Based on 3-Day vs 10-Day Moving Average. {mom_desc}</p>
-    </div>'''
 
     html = f"""
     <!-- ══ COMMODITY BLOCK: {COMMODITIES[prefix]['name']} ══ -->
@@ -1017,7 +994,6 @@ def build_html_block(prefix, info, now):
       </div>
     </div>
 
-    {momentum_html}
     <!-- INTRADAY CHART -->
     <div style="background:#ffffff;padding:16px 20px 18px;border-left:1px solid #e2e8f0;border-right:1px solid #e2e8f0;border-top:1px solid #e2e8f0;">
       {intraday_section}
