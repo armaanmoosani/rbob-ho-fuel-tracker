@@ -142,7 +142,9 @@ def extract_price_near_label(text, label):
     return None
 
 def check_inbox_for_prices(target_date_str):
-    if not GRAVES_EMAIL or not GRAVES_APP_PASSWORD:
+    graves_email = os.environ.get('GRAVES_EMAIL')
+    graves_pass = os.environ.get('GRAVES_APP_PASSWORD')
+    if not graves_email or not graves_pass:
         print("Missing GRAVES_EMAIL or GRAVES_APP_PASSWORD. Cannot check invoices.")
         return None, None
 
@@ -163,7 +165,7 @@ def check_inbox_for_prices(target_date_str):
     for attempt in range(3):
         try:
             mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=15)
-            mail.login(GRAVES_EMAIL, GRAVES_APP_PASSWORD)
+            mail.login(graves_email, graves_pass)
             break
         except Exception as conn_e:
             print(f"IMAP connection/login attempt {attempt + 1} failed: {mask_sensitive_text(conn_e)}")
@@ -210,7 +212,22 @@ def check_inbox_for_prices(target_date_str):
                     continue
                 local_date_str = email_date.astimezone(TZ).date().isoformat()
 
-                if local_date_str != target_date_str:
+                # Allow email date to be either:
+                # 1. Exactly target_date_str (normal case)
+                # 2. The day after target_date_str, before 9:00 AM CT (late case)
+                is_exact_match = (local_date_str == target_date_str)
+                is_late_morning_match = False
+                try:
+                    from datetime import date as _date
+                    target_date = _date.fromisoformat(target_date_str)
+                    email_local_date = email_date.astimezone(TZ).date()
+                    delta_days = (email_local_date - target_date).days
+                    email_hour = email_date.astimezone(TZ).hour
+                    is_late_morning_match = (delta_days == 1 and email_hour < 9)
+                except Exception:
+                    pass
+
+                if not (is_exact_match or is_late_morning_match):
                     continue
 
                 body = ""
@@ -247,7 +264,7 @@ def check_inbox_for_prices(target_date_str):
                     rack_p = prices['rack_p']
                     rack_d = prices['rack_d']
                     print(f"Parsed prices from email: Unleaded={rack_u}, Premium={rack_p}, Diesel={rack_d}")
-                    return local_date_str, (rack_u, rack_p, rack_d)
+                    return target_date_str, (rack_u, rack_p, rack_d)
 
             except Exception as loop_e:
                 print(f"Skipping badly formatted email {num}: {mask_sensitive_text(loop_e)}")
@@ -600,7 +617,7 @@ def main():
     
     # Calculate target date based on Chicago timezone local hour
     now_local = datetime.now(TZ)
-    if now_local.hour < 4:
+    if now_local.hour < 12:
         target_date_str = (now_local - timedelta(days=1)).date().isoformat()
     else:
         target_date_str = now_local.date().isoformat()
@@ -632,13 +649,14 @@ def main():
     if not prices:
         # Determine retry vs. warning behavior
         current_hour = now_local.hour
-        is_final_check = (current_hour == 0) or (current_hour < 4)
+        is_final_check = (current_hour == 0) or (current_hour < 4) or (current_hour in (8, 9))
         
         print(f"No valid price email found for {target_date_str}.")
         if is_final_check:
+            time_label = "midnight" if current_hour < 4 else f"{current_hour}:00 AM"
             send_alert_email(
                 "WARNING: Graves Oil Prices Missing",
-                f"No Graves Oil prices received today for {target_date_str} by midnight. Please check Graves Oil email/website manually."
+                f"No Graves Oil prices received for {target_date_str} by {time_label}. Please check Graves Oil email/website manually."
             )
         else:
             print(f"Prices missing at hour {current_hour}. Will retry on next scheduled run.")

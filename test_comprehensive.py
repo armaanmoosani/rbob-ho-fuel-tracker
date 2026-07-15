@@ -419,24 +419,24 @@ class TestCategory3SettlementCapture(unittest.TestCase):
             shutil.rmtree(temp_dir)
 
     @patch('ingest_prices.datetime')
-    def test_3_6_imap_date_boundary_hour_under_4(self, mock_datetime):
-        # Local hour is 3:59 AM (hour < 4) on 2026-05-18
+    def test_3_6_imap_date_boundary_hour_under_12(self, mock_datetime):
+        # Local hour is 11:59 AM (hour < 12) on 2026-05-18
         tz = pytz.timezone('America/Chicago')
-        dt = tz.localize(datetime(2026, 5, 18, 3, 59, 0))
+        dt = tz.localize(datetime(2026, 5, 18, 11, 59, 0))
         mock_datetime.now.return_value = dt
         mock_datetime.fromisoformat.side_effect = lambda s: datetime.fromisoformat(s)
         
         now_local = dt
-        if now_local.hour < 4:
+        if now_local.hour < 12:
             target_date_str = (now_local - timedelta(days=1)).date().isoformat()
         else:
             target_date_str = now_local.date().isoformat()
         self.assertEqual(target_date_str, "2026-05-17")
         
-        # Test 4 hours or over (e.g. 4:00 AM)
-        dt_4 = tz.localize(datetime(2026, 5, 18, 4, 0, 0))
-        now_local = dt_4
-        if now_local.hour < 4:
+        # Test 12 hours or over (e.g. 12:00 PM)
+        dt_12 = tz.localize(datetime(2026, 5, 18, 12, 0, 0))
+        now_local = dt_12
+        if now_local.hour < 12:
             target_date_str = (now_local - timedelta(days=1)).date().isoformat()
         else:
             target_date_str = now_local.date().isoformat()

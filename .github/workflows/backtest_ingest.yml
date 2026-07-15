@@ -2,7 +2,7 @@ name: Daily Price Ingestion
 
 on:
   schedule:
-    - cron: '0 0,1,2,3,4,5 * * 2-6' # Runs hourly from 7:00 PM to 12:00 AM CT (Mon-Fri evenings) to retry ingestion
+    - cron: '0 0,1,2,3,4,5,13,14 * * 2-6' # Runs hourly from 7:00 PM to 12:00 AM CT (Mon-Fri evenings) and at 8:00 AM CT (Mon-Fri mornings) to retry ingestion
   workflow_dispatch:
 
 concurrency:

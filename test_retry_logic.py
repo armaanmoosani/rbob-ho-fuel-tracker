@@ -1,4 +1,6 @@
 import os
+os.environ['GRAVES_EMAIL'] = 'mock_graves@example.com'
+os.environ['GRAVES_APP_PASSWORD'] = 'mock_graves_pass'
 import sys
 import unittest
 from unittest.mock import patch, MagicMock, mock_open
@@ -183,6 +185,40 @@ class TestRetryAndTargetDateLogic(unittest.TestCase):
             date_str, prices = ingest_prices.check_inbox_for_prices("2026-05-27")
 
         # Standard label parser behavior without sorting: Premium (3.8373) and Diesel (3.7414)
+        self.assertEqual(date_str, "2026-05-27")
+        self.assertEqual(prices, (3.017, 3.8373, 3.7414))
+
+    @patch('ingest_prices.imaplib.IMAP4_SSL')
+    def test_check_inbox_late_morning_match(self, mock_imap_ssl):
+        """Verify that a late email sent early on the next day morning before 9 AM CT matches target_date_str."""
+        mock_conn = MagicMock()
+        mock_imap_ssl.return_value = mock_conn
+        mock_conn.search.return_value = ("OK", [b"1"])
+        mock_conn.fetch.return_value = ("OK", [(None, b"")])
+
+        # Email body has correct prices
+        email_body = (
+            "11 E10 - UNLEADED 3.01700\n"
+            "4 CLEAR DIESEL 3.74140\n"
+            "13 E10 - PREMIUM 3.83730\n"
+        )
+
+        mock_msg = MagicMock()
+        mock_msg.is_multipart.return_value = False
+        mock_msg.get_payload = lambda decode=False: email_body.encode('utf-8') if decode else email_body
+        mock_msg.get_content_type.return_value = 'text/plain'
+        # Date is next day (Thu 28 May) morning at 7:15 AM CT
+        mock_msg.get.side_effect = lambda key: {
+            'From': 'donotreply@gravesoil.com',
+            'Subject': 'Latest prices from Graves Oil Company',
+            'Date': 'Thu, 28 May 2026 07:15:00 -0500'
+        }.get(key)
+
+        with patch('email.message_from_bytes', return_value=mock_msg):
+            # Target date is May 27th
+            date_str, prices = ingest_prices.check_inbox_for_prices("2026-05-27")
+
+        # It should match, and date_str should be the target date (2026-05-27)
         self.assertEqual(date_str, "2026-05-27")
         self.assertEqual(prices, (3.017, 3.8373, 3.7414))
 
