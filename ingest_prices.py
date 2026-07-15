@@ -790,5 +790,6 @@ def main():
             f"The nightly backtester calibration failed to run or commit changes.\n\nError: {mask_sensitive_text(e)}\n\nStderr:\n{mask_sensitive_text(e.stderr)}\n\nPlease check GitHub Actions logs."
         )
 
+# Trigger CI run to verify data consistency on main branch
 if __name__ == "__main__":
     main()
