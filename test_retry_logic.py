@@ -166,6 +166,7 @@ class TestRetryAndTargetDateLogic(unittest.TestCase):
 
         # Email body has: Unleaded=3.017, Premium=3.8373, Diesel=3.7414
         email_body = (
+            "The following prices are good from 5/27/2026 7:00:00 PM through 5/28/2026 6:59:00 PM.\n"
             "11 E10 - UNLEADED 3.01700\n"
             "4 CLEAR DIESEL 3.74140\n"
             "13 E10 - PREMIUM 3.83730\n"
@@ -198,6 +199,7 @@ class TestRetryAndTargetDateLogic(unittest.TestCase):
 
         # Email body has correct prices
         email_body = (
+            "The following prices are good from 5/27/2026 7:00:00 PM through 5/28/2026 6:59:00 PM.\n"
             "11 E10 - UNLEADED 3.01700\n"
             "4 CLEAR DIESEL 3.74140\n"
             "13 E10 - PREMIUM 3.83730\n"

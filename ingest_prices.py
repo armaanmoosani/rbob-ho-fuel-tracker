@@ -249,6 +249,22 @@ def check_inbox_for_prices(target_date_str):
                         else:
                             body = body_decoded
 
+                # Verify target date matches the 'good from' date in the email body if present
+                body_date_match = re.search(r'good\s+from\s+(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', body, re.IGNORECASE)
+                if body_date_match:
+                    b_month = int(body_date_match.group(1))
+                    b_day = int(body_date_match.group(2))
+                    b_year = int(body_date_match.group(3))
+                    if b_year < 100:
+                        b_year += 2000
+                    body_date_str = f"{b_year:04d}-{b_month:02d}-{b_day:02d}"
+                    print(f"Parsed 'good from' date from email body: {body_date_str}")
+                    if body_date_str != target_date_str:
+                        print(f"Email body date {body_date_str} does not match target date {target_date_str}. Skipping this email.")
+                        continue
+                else:
+                    print("Could not find 'good from' date in email body. Falling back to email header date matching.")
+
                 # Primary extraction: labels near known markers
                 prices = {}
                 for key, label in LABELS.items():
