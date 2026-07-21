@@ -513,6 +513,7 @@ def save_settlement_snapshots(all_data, now):
                 return # Already saved today
                 
         ds = {
+            "settlement_schema_version": 2,
             "date": session_str,
             "captured_at": now.isoformat()
         }
@@ -818,7 +819,16 @@ def build_rack_signal(prefix, data, now):
     # Immutable Prediction Audit Log (Idempotent)
     try:
         direction = "HIKE" if "BUY" in action else "DROP" if "WAIT" in action else "FLAT"
-        thresh = hike_thresh if "BUY" in action else drop_thresh if "WAIT" in action else 0.0
+        if action == "BUY_NOW":
+            thresh = hike_thresh
+        elif action == "LEAN_BUY":
+            thresh = lean_hike
+        elif action == "WAIT":
+            thresh = drop_thresh
+        elif action == "LEAN_WAIT":
+            thresh = lean_drop
+        else:
+            thresh = 0.0
         decision = decision_provenance(
             prefix, signal_price, yest, nymex_daily_std=nymex_daily_std,
             z_score=z_score, conviction_label=conviction, conviction_provenance="captured",

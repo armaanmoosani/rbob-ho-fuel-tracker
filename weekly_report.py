@@ -165,6 +165,66 @@ def significance_available(live_prediction_count, resolved_live_count):
     )
 
 
+def policy_savings_cents(predicted_directions, actual_moves):
+    """Apply the same HIKE/WAIT payoff definition to any aligned outcome vector."""
+    directions = np.asarray(predicted_directions)
+    moves = np.asarray(actual_moves, dtype=float)
+    return float(np.select(
+        [directions == "HIKE", directions == "DROP"],
+        [moves, -moves],
+        default=0.0,
+    ).sum())
+
+
+def date_block_permutation_test(df, n_perm=5000, seed=1729):
+    """Test signal/outcome association while preserving same-day commodity dependence.
+
+    RB and HO outcomes from one session are a correlated economic shock, not two
+    independent observations.  We therefore permute complete session outcome
+    blocks among sessions having the same commodity coverage.
+    """
+    required = {"timestamp_dt", "commodity", "predicted_direction", "actual_move"}
+    if not required.issubset(df.columns) or df.empty:
+        raise ValueError("Permutation test requires resolved timestamped predictions.")
+
+    work = df[list(required)].copy()
+    work["session"] = work["timestamp_dt"].dt.date.astype(str)
+    if work.duplicated(["session", "commodity"]).any():
+        raise ValueError("Permutation test cannot use duplicate commodity/session rows.")
+
+    outcomes = {
+        session: dict(zip(rows["commodity"], rows["actual_move"].astype(float)))
+        for session, rows in work.groupby("session", sort=True)
+    }
+    strata = {}
+    for session, commodity_moves in outcomes.items():
+        signature = tuple(sorted(commodity_moves))
+        strata.setdefault(signature, []).append(session)
+
+    real_savings = policy_savings_cents(
+        work["predicted_direction"].to_numpy(), work["actual_move"].to_numpy()
+    )
+    rng = np.random.default_rng(seed)
+    better_or_equal = 0
+    for _ in range(n_perm):
+        donor_for_session = {}
+        for sessions in strata.values():
+            donors = rng.permutation(sessions)
+            donor_for_session.update(zip(sessions, donors))
+        permuted_moves = np.array([
+            outcomes[donor_for_session[row.session]][row.commodity]
+            for row in work.itertuples(index=False)
+        ])
+        permuted_savings = policy_savings_cents(
+            work["predicted_direction"].to_numpy(), permuted_moves
+        )
+        if permuted_savings >= real_savings:
+            better_or_equal += 1
+
+    p_value = float((better_or_equal + 1) / (n_perm + 1))
+    return p_value, real_savings
+
+
 def main():
     if not os.path.exists(CSV_PATH):
         print(f"Historical database missing at: {CSV_PATH}")
@@ -473,51 +533,25 @@ def main():
         
     p_value = None
     p_value_note = (
-        f"Live sample too small for statistical conclusions: "
-        f"{live_prediction_count} live predictions recorded; at least 30 are required."
+        f"Live sample too small for statistical conclusions: {live_prediction_count} "
+        f"live predictions recorded and {len(df_sig)} resolved in {sig_period_str.lower()}; "
+        "at least 30 are required in both counts."
     )
     p_value_str = "Not available"
     
     if significance_available(live_prediction_count, len(df_sig)):
-        real_sig_savings = 0.0
-        pred_dirs = []
-        actual_moves = []
-        
-        for idx, row in df_sig.iterrows():
-            pred = row['predicted_direction']
-            act = row['actual_move']
-            pred_dirs.append(pred)
-            actual_moves.append(act)
-            if pred == 'HIKE':
-                real_sig_savings += act
-            elif pred == 'DROP':
-                real_sig_savings += -act
-                
-        n_perm = 1000
-        perm_savings = []
-        for _ in range(n_perm):
-            shuffled_actuals = np.random.permutation(actual_moves)
-            sh_sav = 0.0
-            for p_dir, sh_act in zip(pred_dirs, shuffled_actuals):
-                if p_dir == 'HIKE':
-                    sh_sav += sh_act
-                elif p_dir == 'DROP':
-                    sh_sav += -sh_act
-            perm_savings.append(sh_sav)
-            
-        better_trials = np.sum(np.array(perm_savings) >= real_sig_savings)
-        p_value = float((better_trials + 1) / (n_perm + 1))
+        p_value, real_sig_savings = date_block_permutation_test(df_sig)
         
         if p_value < 0.05:
             if p_value < 0.001:
                 p_value_str = "p < 0.001"
-                p_value_note = "The model shows a highly significant trading edge (p < 0.001). This means there is less than a 0.1% probability that these savings were achieved by random chance."
+                p_value_note = "The recorded live association is highly significant under a date-block permutation null (p < 0.001). RB and HO outcomes remain paired within each session."
             else:
                 p_value_str = f"p = {p_value:.3f}"
-                p_value_note = f"The model shows a statistically significant trading edge (p = {p_value:.3f} < 0.05). This means there is less than a 5% probability that these savings were achieved by random chance."
+                p_value_note = f"The recorded live association is significant under a date-block permutation null (p = {p_value:.3f} < 0.05). RB and HO outcomes remain paired within each session."
         else:
             p_value_str = f"p = {p_value:.3f}"
-            p_value_note = f"The model significance is within normal bounds (p = {p_value:.3f} >= 0.05). This suggests that recent price moves contain more noise; continue to monitor performance parameters."
+            p_value_note = f"The recorded live sample is not significant under the date-block permutation null (p = {p_value:.3f} >= 0.05). Continue accumulating live outcomes before drawing a performance conclusion."
 
     # Plotting (Cropped to last 90 days for clarity)
     plot_cutoff = pd.Timestamp.now(tz='America/Chicago') - pd.Timedelta(days=90)

@@ -300,6 +300,9 @@ def validate_prediction_log(log_path):
     if not captured['conviction_label'].isin(captured_labels).all():
         print("Data validation failed: Captured live conviction is missing or invalid.")
         sys.exit(1)
+    if not (captured['contract_provenance_status'] == 'verified').all():
+        print("Data validation failed: Captured live signal lacks verified contract provenance.")
+        sys.exit(1)
     numeric_capture_cols = [
         "nymex_daily_std_used", "z_score_used", "hike_threshold_used",
         "drop_threshold_used", "lean_hike_threshold_used", "lean_drop_threshold_used",
@@ -330,6 +333,55 @@ def validate_prediction_log(log_path):
         expected_artifact = f"metrics:{str(row['metrics_cache_hash'])[:16]}"
         if str(row['metrics_cache_hash']) != 'missing' and artifact != expected_artifact:
             print("Data validation failed: Captured live conviction has mismatched calibration artifact.")
+            sys.exit(1)
+
+        try:
+            move = float(row['nymex_move_cents'])
+            std = float(row['nymex_daily_std_used'])
+            z_score = float(row['z_score_used'])
+            signal_price = float(row['signal_price_used'])
+            baseline_price = float(row['baseline_price_used'])
+            hike = float(row['hike_threshold_used'])
+            drop = float(row['drop_threshold_used'])
+            lean_hike = float(row['lean_hike_threshold_used'])
+            lean_drop = float(row['lean_drop_threshold_used'])
+            threshold_used = float(row['threshold_used'])
+        except (TypeError, ValueError) as exc:
+            print(f"Data validation failed: Captured live calculation is not numeric: {exc}")
+            sys.exit(1)
+        if std <= 0:
+            print("Data validation failed: Captured live standard deviation must be positive.")
+            sys.exit(1)
+        price_move = (signal_price - baseline_price) * 100.0
+        if abs(price_move - move) > 0.011:
+            print("Data validation failed: Captured live price change does not match its prices.")
+            sys.exit(1)
+        if abs(z_score - move / std) > 0.005:
+            print("Data validation failed: Captured live Z-score is mathematically inconsistent.")
+            sys.exit(1)
+        expected_label = (
+            "High Conviction" if abs(z_score) >= 1.5
+            else "Moderate Conviction" if abs(z_score) >= 1.0
+            else "Low Conviction"
+        )
+        if row['conviction_label'] != expected_label:
+            print("Data validation failed: Captured live conviction label does not match Z-score.")
+            sys.exit(1)
+        if price_move >= hike:
+            expected_direction, expected_threshold = "HIKE", hike
+        elif price_move <= drop:
+            expected_direction, expected_threshold = "DROP", drop
+        elif price_move >= lean_hike:
+            expected_direction, expected_threshold = "HIKE", lean_hike
+        elif price_move <= lean_drop:
+            expected_direction, expected_threshold = "DROP", lean_drop
+        else:
+            expected_direction, expected_threshold = "FLAT", 0.0
+        if row['predicted_direction'] != expected_direction:
+            print("Data validation failed: Captured live direction does not match its thresholds.")
+            sys.exit(1)
+        if abs(threshold_used - expected_threshold) > 0.011:
+            print("Data validation failed: Captured live triggering threshold is incorrect.")
             sys.exit(1)
 
     suppressed = live_v3[live_v3['conviction_provenance'] == 'suppressed']
@@ -393,6 +445,46 @@ def validate_settlement_provenance(provenance_path):
     print("Settlement provenance validation: PASSED")
 
 
+def validate_daily_settlement(settlement_path):
+    if not os.path.exists(settlement_path):
+        return
+    try:
+        with open(settlement_path, "r", encoding="utf-8") as handle:
+            settlement = json.load(handle)
+        date.fromisoformat(str(settlement["date"]))
+        captured = pd.Timestamp(settlement["captured_at"])
+        if captured.tzinfo is None:
+            raise ValueError("captured_at must include a timezone")
+    except Exception as e:
+        print(f"Data validation failed: Invalid daily settlement metadata: {e}")
+        sys.exit(1)
+    try:
+        schema_version = int(settlement.get("settlement_schema_version", 1))
+    except (TypeError, ValueError):
+        print("Data validation failed: Invalid daily settlement schema version.")
+        sys.exit(1)
+
+    price_contract_fields = (
+        ("rbob_settlement", "rbob_contract", "RB"),
+        ("heating_oil_settlement", "heating_oil_contract", "HO"),
+    )
+    for price_key, contract_key, prefix in price_contract_fields:
+        if price_key not in settlement:
+            continue
+        try:
+            if not math.isfinite(float(settlement[price_key])) or float(settlement[price_key]) <= 0:
+                raise ValueError("price must be positive and finite")
+        except (TypeError, ValueError) as e:
+            print(f"Data validation failed: Invalid {price_key}: {e}")
+            sys.exit(1)
+        if schema_version >= 2:
+            contract = str(settlement.get(contract_key, ""))
+            if not re.fullmatch(rf"/{prefix}[FGHJKMNQUVXZ][0-9]{{2}}", contract):
+                print(f"Data validation failed: Invalid {contract_key} in daily settlement.")
+                sys.exit(1)
+    print("Daily settlement validation: PASSED")
+
+
 def validate_calibration_artifacts(artifact_path):
     if not os.path.exists(artifact_path):
         return
@@ -410,6 +502,8 @@ def validate_and_update_hashes(data_dir):
         files_to_track.append("nymex_settlement_provenance.csv")
     if os.path.exists(os.path.join(data_dir, "calibration_runs.jsonl")):
         files_to_track.append("calibration_runs.jsonl")
+    if os.path.exists(os.path.join(data_dir, "daily_settlement.json")):
+        files_to_track.append("daily_settlement.json")
     
     existing_records = []
     if os.path.exists(hash_csv_path):
@@ -467,7 +561,7 @@ def validate_and_update_hashes(data_dir):
             recorded_line_count = int(latest_record['line_count'])
             recorded_sha256 = latest_record['sha256']
             
-            if fname in ("config.json", "metrics_cache.json"):
+            if fname in ("config.json", "metrics_cache.json", "daily_settlement.json"):
                 # Verify JSON validity
                 try:
                     full_content = "\n".join(lines)
@@ -545,10 +639,12 @@ def validate_all(data_dir=None):
     log_path = os.path.join(data_dir, "prediction_log.csv")
     provenance_path = os.path.join(data_dir, "nymex_settlement_provenance.csv")
     artifact_path = os.path.join(data_dir, "calibration_runs.jsonl")
+    daily_settlement_path = os.path.join(data_dir, "daily_settlement.json")
     
     validate_graves_history(csv_path)
     validate_prediction_log(log_path)
     validate_settlement_provenance(provenance_path)
+    validate_daily_settlement(daily_settlement_path)
     validate_calibration_artifacts(artifact_path)
     validate_and_update_hashes(data_dir)
 

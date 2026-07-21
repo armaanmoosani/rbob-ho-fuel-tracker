@@ -65,7 +65,7 @@ def load_config():
             
     return cfg
 
-def save_metrics_cache(cfg):
+def save_metrics_cache(cfg, effective_session=None, source_history_hash=None):
     output_keys = [
         "ROLLING_WINDOW_DAYS",
         "LAG_DAYS"
@@ -74,9 +74,13 @@ def save_metrics_cache(cfg):
         if k.startswith("RB_") or k.startswith("HO_"):
             output_keys.append(k)
     cache_data = {k: cfg[k] for k in output_keys if k in cfg}
-    cache_data["CALIBRATION_EFFECTIVE_SESSION"] = datetime.now(
-        pytz.timezone("America/Chicago")
-    ).date().isoformat()
+    cache_data["CALIBRATION_EFFECTIVE_SESSION"] = (
+        str(effective_session)[:10] if effective_session else datetime.now(
+            pytz.timezone("America/Chicago")
+        ).date().isoformat()
+    )
+    if source_history_hash:
+        cache_data["CALIBRATION_SOURCE_HISTORY_HASH"] = source_history_hash
     
     tmp_path = METRICS_CACHE_PATH + ".tmp"
     with open(tmp_path, "w") as f:
@@ -97,8 +101,10 @@ def git_commit_push(message):
             paths.append("data/calibration_runs.jsonl")
         subprocess.run(["git", "add", *paths], check=True)
         # Check if there are changes before committing
-        status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, check=True)
-        if status.stdout.strip():
+        staged = subprocess.run(["git", "diff", "--cached", "--quiet"])
+        if staged.returncode not in (0, 1):
+            raise subprocess.CalledProcessError(staged.returncode, staged.args)
+        if staged.returncode != 0:
             subprocess.run(["git", "commit", "-m", message], check=True)
             subprocess.run(["git", "push"], check=True)
             print("Successfully committed and pushed metrics changes.")
@@ -491,6 +497,41 @@ def _calibration_payload(cfg):
     return {key: cfg[key] for key in sorted(set(keys)) if key in cfg}
 
 
+def _eligible_training_history(df, effective_session=None):
+    clean = df.copy()
+    clean["date"] = pd.to_datetime(clean["date"])
+    clean = clean[clean["date"].dt.dayofweek < 5].sort_values("date").reset_index(drop=True)
+    if len(clean) <= CALIBRATION_PURGE_ROWS:
+        raise ValueError("Not enough history to create a purged calibration artifact.")
+
+    requested_session = pd.Timestamp(effective_session).date() if effective_session else None
+    matching_sessions = clean.index[clean["date"].dt.date == requested_session].tolist() \
+        if requested_session else []
+    if matching_sessions:
+        training_end_index = matching_sessions[0] - 1
+    else:
+        training_end_index = len(clean) - 1
+    if training_end_index < 0:
+        raise ValueError("No completed rack outcome exists before this calibration session.")
+    return clean, clean.iloc[:training_end_index + 1].copy()
+
+
+def calibration_is_current(cfg, source_history_hash, effective_session,
+                           latest_history_session):
+    """Return whether this exact history has already changed the live cache.
+
+    Caches written before source hashes were introduced are accepted once when
+    their recorded session equals either the last history row (the old meaning)
+    or the next decision session (the corrected meaning).  Saving the cache then
+    migrates it to the unambiguous hash-based form without another smoothing.
+    """
+    cached_hash = cfg.get("CALIBRATION_SOURCE_HISTORY_HASH")
+    cached_session = str(cfg.get("CALIBRATION_EFFECTIVE_SESSION", ""))[:10]
+    if cached_hash:
+        return cached_hash == source_history_hash and cached_session == effective_session
+    return cached_session in {str(latest_history_session)[:10], effective_session}
+
+
 def build_shadow_calibration_artifact(df, cfg, effective_session=None,
                                       prior_artifact=None, windows=None,
                                       hike_percentiles=None, drop_percentiles=None):
@@ -502,41 +543,37 @@ def build_shadow_calibration_artifact(df, cfg, effective_session=None,
     a fully received nightly rack row from tomorrow's calibration would add an
     unnecessary one-session delay without preventing leakage.
     """
-    clean = df.copy()
-    clean["date"] = pd.to_datetime(clean["date"])
-    clean = clean[clean["date"].dt.dayofweek < 5].sort_values("date").reset_index(drop=True)
-    if len(clean) <= CALIBRATION_PURGE_ROWS:
-        raise ValueError("Not enough history to create a purged calibration artifact.")
-
-    requested_session = pd.Timestamp(effective_session).date() if effective_session else None
-    matching_sessions = clean.index[clean["date"].dt.date == requested_session].tolist() \
-        if requested_session else []
-    if matching_sessions:
-        # Historical replay artifact: only outcomes strictly before the decision
-        # session were knowable at the decision time.
-        training_end_index = matching_sessions[0] - 1
-    else:
-        # Nightly production artifact for the next business session: today's
-        # completed rack outcome is already known and is eligible.
-        training_end_index = len(clean) - 1
-    if training_end_index < 0:
-        raise ValueError("No completed rack outcome exists before this calibration session.")
-    training_df = clean.iloc[:training_end_index + 1].copy()
+    clean, training_df = _eligible_training_history(df, effective_session)
     effective_session = effective_session or _next_nymex_business_session(clean["date"].iloc[-1])
 
     artifact_cfg = dict(cfg)
     if prior_artifact:
         artifact_cfg.update(prior_artifact["calibration"])
 
+    candidate_grid = {
+        "windows": list(windows or [90, 120, 180, 240]),
+        "hike_percentiles": list(hike_percentiles or [10, 15, 20, 25]),
+        "drop_percentiles": list(drop_percentiles or [75, 80, 85, 90]),
+    }
+    smoothing_input = {
+        "BLEND_ALPHA": artifact_cfg.get("BLEND_ALPHA", 0.3),
+        "RB_HIKE_THRESHOLD_CENTS": artifact_cfg.get("RB_HIKE_THRESHOLD_CENTS", 1.0),
+        "RB_DROP_THRESHOLD_CENTS": artifact_cfg.get("RB_DROP_THRESHOLD_CENTS", -1.0),
+        "HO_HIKE_THRESHOLD_CENTS": artifact_cfg.get("HO_HIKE_THRESHOLD_CENTS", 1.0),
+        "HO_DROP_THRESHOLD_CENTS": artifact_cfg.get("HO_DROP_THRESHOLD_CENTS", -1.0),
+    }
+
     artifact_cfg, _, rb_window = run_optimization(
         training_df, "nymex_rb", "rack_u", "RB", artifact_cfg,
-        windows=windows, hike_percentiles=hike_percentiles,
-        drop_percentiles=drop_percentiles,
+        windows=candidate_grid["windows"],
+        hike_percentiles=candidate_grid["hike_percentiles"],
+        drop_percentiles=candidate_grid["drop_percentiles"],
     )
     artifact_cfg, _, ho_window = run_optimization(
         training_df, "nymex_ho", "rack_d", "HO", artifact_cfg,
-        windows=windows, hike_percentiles=hike_percentiles,
-        drop_percentiles=drop_percentiles,
+        windows=candidate_grid["windows"],
+        hike_percentiles=candidate_grid["hike_percentiles"],
+        drop_percentiles=candidate_grid["drop_percentiles"],
     )
     artifact_cfg["ROLLING_WINDOW_DAYS"] = rb_window
     artifact_cfg["LAG_DAYS"] = 0
@@ -550,7 +587,9 @@ def build_shadow_calibration_artifact(df, cfg, effective_session=None,
         "source_history_hash": _history_hash(training_df),
         "source_row_count": len(training_df),
         "candidate_grid_version": CALIBRATION_GRID_VERSION,
+        "candidate_grid": candidate_grid,
         "objective": "median_out_of_sample_savings_cents; three 90-session purged folds",
+        "smoothing_input": smoothing_input,
         "prior_artifact_id": prior_artifact["artifact_id"] if prior_artifact else "bootstrap_config",
         "calibration": _calibration_payload(artifact_cfg),
         "generated_at": datetime.now(pytz.timezone("America/Chicago")).isoformat(),
@@ -570,8 +609,21 @@ def write_shadow_calibration_artifact(df, cfg):
          if item["effective_session"] == effective_session),
         None,
     )
-    # A rerun must reproduce the original state transition.  In particular, it
-    # cannot smooth against the artifact it is attempting to verify.
+    if existing_index is not None:
+        existing = artifacts[existing_index]
+        _, training_df = _eligible_training_history(df, effective_session)
+        if (
+            existing["training_end"] != training_df["date"].iloc[-1].date().isoformat()
+            or existing["source_row_count"] != len(training_df)
+            or existing["source_history_hash"] != _history_hash(training_df)
+        ):
+            raise ValueError(
+                f"Source history no longer matches calibration artifact for {effective_session}."
+            )
+        print(f"Verified existing shadow calibration artifact {existing['artifact_id'][:12]} "
+              f"for {effective_session} (training through {existing['training_end']}).")
+        return existing, False
+
     prior = artifacts[existing_index - 1] if existing_index and existing_index > 0 \
         else (artifacts[-1] if existing_index is None and artifacts else None)
     artifact = build_shadow_calibration_artifact(
@@ -604,15 +656,31 @@ def main():
         print(f"Insufficient data. Have {len(df)} rows, need {min_rows}. Exiting.")
         sys.exit(0)
 
-    # Walk-forward optimization separately for RB and HO
-    cfg, msg_rb, rb_win = run_optimization(df, 'nymex_rb', 'rack_u', 'RB', cfg)
-    cfg, msg_ho, ho_win = run_optimization(df, 'nymex_ho', 'rack_d', 'HO', cfg)
+    source_history_hash = _history_hash(df)
+    latest_history_session = df['date'].iloc[-1].date().isoformat()
+    effective_session = _next_nymex_business_session(df['date'].iloc[-1])
+    if calibration_is_current(
+        cfg, source_history_hash, effective_session, latest_history_session
+    ):
+        rb_win = cfg.get("RB_window_days", cfg.get("ROLLING_WINDOW_DAYS", 120))
+        ho_win = cfg.get("HO_window_days", cfg.get("ROLLING_WINDOW_DAYS", 120))
+        msg_rb = "unchanged history; calibration preserved"
+        msg_ho = "unchanged history; calibration preserved"
+        print(
+            f"Calibration already applied to history through {latest_history_session}; "
+            "skipping repeated threshold smoothing."
+        )
+    else:
+        # Walk-forward optimization separately for RB and HO.
+        cfg, msg_rb, rb_win = run_optimization(df, 'nymex_rb', 'rack_u', 'RB', cfg)
+        cfg, msg_ho, ho_win = run_optimization(df, 'nymex_ho', 'rack_d', 'HO', cfg)
 
-    # For logging compatibility, store the RB window as ROLLING_WINDOW_DAYS
-    cfg["ROLLING_WINDOW_DAYS"] = rb_win
-    cfg["LAG_DAYS"] = 0 # lag is physically zero
+        # For logging compatibility, store the RB window as ROLLING_WINDOW_DAYS.
+        cfg["ROLLING_WINDOW_DAYS"] = rb_win
+        cfg["LAG_DAYS"] = 0 # lag is physically zero
 
-    save_metrics_cache(cfg)
+    # Also migrates a legacy date-only cache without changing its thresholds.
+    save_metrics_cache(cfg, effective_session, source_history_hash)
 
     # Shadow-only until a full calibration window has accumulated.  Live tracker
     # thresholds remain on the established cache path during this validation run.

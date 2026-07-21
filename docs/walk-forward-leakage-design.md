@@ -67,6 +67,14 @@ training and test blocks inside the walk-forward optimizer; a production
 artifact still includes the latest fully received rack outcome for the next
 session's decision.
 
+Live cache updates are keyed by the eligible history hash and next NYMEX
+business session. Re-running calibration against unchanged history verifies the
+existing state and cannot apply threshold smoothing a second time.
+
+Artifact schema v2 records the exact candidate grid and smoothing inputs. The
+initial schema-v1 artifact remains immutable and replayable; validators accept
+both versions while all newly created sessions use v2.
+
 The existing `metrics_cache.json` path remains the live signal input during the
 shadow period. This is intentional: it avoids changing purchase decisions until
 there is a full rolling-window chain of artifacts to compare against the legacy
