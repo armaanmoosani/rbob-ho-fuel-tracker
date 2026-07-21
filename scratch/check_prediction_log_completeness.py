@@ -13,6 +13,7 @@ sys.path.append(parent_dir)
 import backtest
 import validate_data
 from replay_day import simulate_thresholds_at_date
+from calibration_artifacts import CalibrationArtifactUnavailable
 
 DATA_DIR = os.path.join(parent_dir, "data")
 CSV_PATH = os.path.join(DATA_DIR, "graves_history.csv")
@@ -130,7 +131,12 @@ def main():
             
         # Get point-in-time calibrated configuration
         if target_date not in config_cache:
-            calibrated_cfg = simulate_thresholds_at_date(df_hist, target_date)
+            try:
+                calibrated_cfg = simulate_thresholds_at_date(df_hist, target_date)
+            except CalibrationArtifactUnavailable:
+                print(f"No point-in-time calibration artifact for {target_date}; skipping historical estimate.")
+                skipped_count += 1
+                continue
             config_cache[target_date] = calibrated_cfg
         else:
             calibrated_cfg = config_cache[target_date]

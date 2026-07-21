@@ -589,7 +589,7 @@ class TestCategory7WalkForward(unittest.TestCase):
         W = 10
         test_size = 90
         folds = 3
-        total_rows = W + test_size * folds  # 10 + 270 = 280 rows
+        total_rows = W + test_size * folds + 1  # one explicit purged session
         
         dates = pd.date_range("2026-01-01", periods=total_rows).strftime("%Y-%m-%d").tolist()
         df = pd.DataFrame({
@@ -626,7 +626,7 @@ class TestCategory7WalkForward(unittest.TestCase):
         W = 120
         test_size = 90
         folds = 3
-        total_rows = W + test_size * folds
+        total_rows = W + test_size * folds + 1  # one explicit purged session
         
         dates = pd.date_range("2026-01-01", periods=total_rows).strftime("%Y-%m-%d").tolist()
         df = pd.DataFrame({
@@ -650,21 +650,15 @@ class TestCategory7WalkForward(unittest.TestCase):
             
         self.assertEqual(len(captured_train_dfs), folds)
         
-        for f in range(folds):
-            N = len(df)
-            test_start_idx = N - (f + 1) * test_size
-            test_end_idx = N - f * test_size if f > 0 else N
-            
-            df_test = df.iloc[test_start_idx:test_end_idx]
-            df_train = captured_train_dfs[f]
-            
-            train_max_date = df_train['date'].max()
-            test_min_date = df_test['date'].min()
-            self.assertLess(train_max_date, test_min_date)
-            
-            train_dates = set(df_train['date'])
-            test_dates = set(df_test['date'])
-            self.assertTrue(train_dates.isdisjoint(test_dates))
+        boundaries = backtest.build_purged_walk_forward_folds(row_count=len(df), window_days=W)
+        for df_train, boundary in zip(captured_train_dfs, boundaries):
+            df_test = df.iloc[boundary['test_start']:boundary['test_end']]
+            df_purge = df.iloc[boundary['purge_start']:boundary['purge_end']]
+            self.assertEqual(len(df_purge), 1)
+            self.assertLess(df_train['date'].max(), df_purge['date'].min())
+            self.assertLess(df_purge['date'].max(), df_test['date'].min())
+            self.assertTrue(set(df_train['date']).isdisjoint(df_test['date']))
+            self.assertTrue(set(df_train['date']).isdisjoint(df_purge['date']))
 
 
 class TestCategory8CVaRAndRiskMetrics(unittest.TestCase):

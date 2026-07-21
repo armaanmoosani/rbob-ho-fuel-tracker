@@ -1,11 +1,18 @@
 import os
 import sys
 import json
+import hashlib
 import subprocess
 import pandas as pd
 import numpy as np
 import validate_data
-from futures_util import is_contract_roll_day
+from futures_util import is_contract_roll_day, is_nymex_business_day
+from calibration_artifacts import (
+    ARTIFACT_SCHEMA_VERSION,
+    append_calibration_artifact,
+    artifact_id,
+    load_calibration_artifacts,
+)
 import pytz
 from datetime import datetime
 
@@ -13,6 +20,9 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 CSV_PATH = os.path.join(DATA_DIR, "graves_history.csv")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 METRICS_CACHE_PATH = os.path.join(DATA_DIR, "metrics_cache.json")
+CALIBRATION_RUNS_PATH = os.path.join(DATA_DIR, "calibration_runs.jsonl")
+CALIBRATION_PURGE_ROWS = 1
+CALIBRATION_GRID_VERSION = "v1-purged-three-fold"
 
 def load_config():
     defaults = {
@@ -82,7 +92,10 @@ def git_commit_push(message):
         subprocess.run(["git", "--version"], capture_output=True, check=True)
         subprocess.run(["git", "config", "--global", "user.name", "github-actions[bot]"], check=True)
         subprocess.run(["git", "config", "--global", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
-        subprocess.run(["git", "add", "data/metrics_cache.json", "data/integrity_hashes.csv"], check=True)
+        paths = ["data/metrics_cache.json", "data/integrity_hashes.csv"]
+        if os.path.exists(CALIBRATION_RUNS_PATH):
+            paths.append("data/calibration_runs.jsonl")
+        subprocess.run(["git", "add", *paths], check=True)
         # Check if there are changes before committing
         status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, check=True)
         if status.stdout.strip():
@@ -143,31 +156,64 @@ def train_thresholds(delta_nymex, delta_rack, Hp, Dp, clamp_bounds=None):
 
     return hike_thresh, drop_thresh
 
-def simulate_walk_forward(df, nymex_col, rack_col, W, Hp, Dp, prefix, clamp_bounds=None):
+def build_purged_walk_forward_folds(row_count, window_days, test_size=90,
+                                    fold_count=3, purge_rows=CALIBRATION_PURGE_ROWS):
+    """Return chronological, non-overlapping train/purge/test boundaries.
+
+    Indices use normal Python half-open intervals.  The purge separates every
+    training endpoint from the following test block, including in the most
+    recent fold, so a rack outcome cannot influence the threshold that scores
+    it.
+    """
+    if purge_rows < 1:
+        raise ValueError("purge_rows must be at least one session")
+    folds = []
+    for fold_number in range(fold_count):
+        test_start = row_count - (fold_number + 1) * test_size
+        test_end = row_count - fold_number * test_size if fold_number else row_count
+        train_end = test_start - purge_rows
+        train_start = train_end - window_days
+        if train_start < 0:
+            return []
+        folds.append({
+            "train_start": train_start,
+            "train_end": train_end,
+            "purge_start": train_end,
+            "purge_end": test_start,
+            "test_start": test_start,
+            "test_end": test_end,
+        })
+    return list(reversed(folds))
+
+
+def simulate_walk_forward(df, nymex_col, rack_col, W, Hp, Dp, prefix,
+                          clamp_bounds=None, purge_rows=CALIBRATION_PURGE_ROWS):
     """
     Simulates walk-forward out-of-sample testing on 3 folds.
     Returns the median savings across all folds.
     """
+    # Callers outside run_optimization may pass raw prices.  Compute once over
+    # the complete series so the first test row retains its prior-session move.
+    df = df.copy()
+    if "delta_nymex" not in df.columns:
+        df["delta_nymex"] = df[nymex_col].diff() * 100
+    if "delta_rack" not in df.columns:
+        df["delta_rack"] = df[rack_col].diff() * 100
+
     # 3 folds, 90-day test window each
     folds = 3
     test_size = 90
-    total_needed = test_size * folds
-    if len(df) < total_needed + W:
+    fold_boundaries = build_purged_walk_forward_folds(
+        len(df), W, test_size, folds, purge_rows
+    )
+    if not fold_boundaries:
         return -9999.0
 
     fold_savings = []
 
-    for f in range(folds):
-        # N = length of dataset
-        N = len(df)
-        # test window starts at N - (f+1)*90, ends at N - f*90
-        test_start = N - (f + 1) * test_size
-        test_end = N - f * test_size if f > 0 else N
-        
-        train_start = max(0, test_start - W)
-        
-        df_train = df.iloc[train_start:test_start]
-        df_test = df.iloc[test_start:test_end]
+    for boundary in fold_boundaries:
+        df_train = df.iloc[boundary["train_start"]:boundary["train_end"]]
+        df_test = df.iloc[boundary["test_start"]:boundary["test_end"]]
 
         # Clean and get training deltas
         train_nymex, train_rack = get_clean_deltas(df_train, nymex_col, rack_col)
@@ -196,7 +242,8 @@ def simulate_walk_forward(df, nymex_col, rack_col, W, Hp, Dp, prefix, clamp_boun
 
     return np.median(fold_savings)
 
-def run_optimization(df, nymex_col, rack_col, prefix, cfg):
+def run_optimization(df, nymex_col, rack_col, prefix, cfg, windows=None,
+                     hike_percentiles=None, drop_percentiles=None):
     """
     Runs grid search over window and percentiles, finds the best parameters
     using median out-of-sample savings, trains final thresholds,
@@ -214,9 +261,9 @@ def run_optimization(df, nymex_col, rack_col, prefix, cfg):
     df['delta_nymex'] = df[nymex_col].diff() * 100
     df['delta_rack'] = df[rack_col].diff() * 100
 
-    windows = [90, 120, 180, 240]
-    hike_percentiles = [10, 15, 20, 25]
-    drop_percentiles = [75, 80, 85, 90]
+    windows = windows or [90, 120, 180, 240]
+    hike_percentiles = hike_percentiles or [10, 15, 20, 25]
+    drop_percentiles = drop_percentiles or [75, 80, 85, 90]
 
     best_median_savings = -9999.0
     best_params = None
@@ -419,10 +466,128 @@ def run_optimization(df, nymex_col, rack_col, prefix, cfg):
     msg = f"Hike={smoothed_hike}c, Drop={smoothed_drop}c, Vol={nymex_std:.2f}c, CVaR={cvar_val:.2f}c"
     return cfg, msg, opt_W
 
+
+def _next_nymex_business_session(day):
+    session = pd.Timestamp(day).date() + pd.Timedelta(days=1)
+    while not is_nymex_business_day(session):
+        session += pd.Timedelta(days=1)
+    return session.isoformat()
+
+
+def _history_hash(df):
+    """Stable hash of exactly the rows eligible to train one artifact."""
+    normalized = df.copy()
+    normalized["date"] = pd.to_datetime(normalized["date"]).dt.strftime("%Y-%m-%d")
+    payload = normalized.to_csv(index=False, lineterminator="\n", float_format="%.10f")
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _calibration_payload(cfg):
+    keys = [
+        "ROLLING_WINDOW_DAYS", "LAG_DAYS", "BLEND_ALPHA",
+        "CLAMP_HIKE_MIN", "CLAMP_HIKE_MAX", "CLAMP_DROP_MIN", "CLAMP_DROP_MAX",
+    ]
+    keys.extend(key for key in cfg if key.startswith("RB_") or key.startswith("HO_"))
+    return {key: cfg[key] for key in sorted(set(keys)) if key in cfg}
+
+
+def build_shadow_calibration_artifact(df, cfg, effective_session=None,
+                                      prior_artifact=None, windows=None,
+                                      hike_percentiles=None, drop_percentiles=None):
+    """Build, but do not persist, the calibration eligible for the next session.
+
+    The artifact includes every rack outcome known when it is produced.  The
+    one-session purge is applied inside its historical validation folds, where
+    it prevents an evaluated row from influencing the preceding fit.  Excluding
+    a fully received nightly rack row from tomorrow's calibration would add an
+    unnecessary one-session delay without preventing leakage.
+    """
+    clean = df.copy()
+    clean["date"] = pd.to_datetime(clean["date"])
+    clean = clean[clean["date"].dt.dayofweek < 5].sort_values("date").reset_index(drop=True)
+    if len(clean) <= CALIBRATION_PURGE_ROWS:
+        raise ValueError("Not enough history to create a purged calibration artifact.")
+
+    requested_session = pd.Timestamp(effective_session).date() if effective_session else None
+    matching_sessions = clean.index[clean["date"].dt.date == requested_session].tolist() \
+        if requested_session else []
+    if matching_sessions:
+        # Historical replay artifact: only outcomes strictly before the decision
+        # session were knowable at the decision time.
+        training_end_index = matching_sessions[0] - 1
+    else:
+        # Nightly production artifact for the next business session: today's
+        # completed rack outcome is already known and is eligible.
+        training_end_index = len(clean) - 1
+    if training_end_index < 0:
+        raise ValueError("No completed rack outcome exists before this calibration session.")
+    training_df = clean.iloc[:training_end_index + 1].copy()
+    effective_session = effective_session or _next_nymex_business_session(clean["date"].iloc[-1])
+
+    artifact_cfg = dict(cfg)
+    if prior_artifact:
+        artifact_cfg.update(prior_artifact["calibration"])
+
+    artifact_cfg, _, rb_window = run_optimization(
+        training_df, "nymex_rb", "rack_u", "RB", artifact_cfg,
+        windows=windows, hike_percentiles=hike_percentiles,
+        drop_percentiles=drop_percentiles,
+    )
+    artifact_cfg, _, ho_window = run_optimization(
+        training_df, "nymex_ho", "rack_d", "HO", artifact_cfg,
+        windows=windows, hike_percentiles=hike_percentiles,
+        drop_percentiles=drop_percentiles,
+    )
+    artifact_cfg["ROLLING_WINDOW_DAYS"] = rb_window
+    artifact_cfg["LAG_DAYS"] = 0
+
+    artifact = {
+        "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+        "effective_session": str(effective_session)[:10],
+        "training_start": training_df["date"].iloc[0].date().isoformat(),
+        "training_end": training_df["date"].iloc[-1].date().isoformat(),
+        "purge_rows": CALIBRATION_PURGE_ROWS,
+        "source_history_hash": _history_hash(training_df),
+        "source_row_count": len(training_df),
+        "candidate_grid_version": CALIBRATION_GRID_VERSION,
+        "objective": "median_out_of_sample_savings_cents; three 90-session purged folds",
+        "prior_artifact_id": prior_artifact["artifact_id"] if prior_artifact else "bootstrap_config",
+        "calibration": _calibration_payload(artifact_cfg),
+        "generated_at": datetime.now(pytz.timezone("America/Chicago")).isoformat(),
+    }
+    artifact["artifact_id"] = artifact_id(artifact)
+    return artifact
+
+
+def write_shadow_calibration_artifact(df, cfg):
+    """Persist one immutable next-session artifact without changing live inputs."""
+    artifacts = load_calibration_artifacts(CALIBRATION_RUNS_PATH)
+    dates = pd.to_datetime(df["date"])
+    latest_session = dates[dates.dt.dayofweek < 5].max()
+    effective_session = _next_nymex_business_session(latest_session)
+    existing_index = next(
+        (index for index, item in enumerate(artifacts)
+         if item["effective_session"] == effective_session),
+        None,
+    )
+    # A rerun must reproduce the original state transition.  In particular, it
+    # cannot smooth against the artifact it is attempting to verify.
+    prior = artifacts[existing_index - 1] if existing_index and existing_index > 0 \
+        else (artifacts[-1] if existing_index is None and artifacts else None)
+    artifact = build_shadow_calibration_artifact(
+        df, cfg, effective_session=effective_session, prior_artifact=prior
+    )
+    written, created = append_calibration_artifact(CALIBRATION_RUNS_PATH, artifact)
+    action = "Created" if created else "Verified existing"
+    print(f"{action} shadow calibration artifact {written['artifact_id'][:12]} "
+          f"for {written['effective_session']} (training through {written['training_end']}).")
+    return written, created
+
 def main():
     print("Starting walk-forward backtest engine...")
     validate_data.validate_all(DATA_DIR)
     cfg = load_config()
+    calibration_seed_cfg = dict(cfg)
 
     if not os.path.exists(CSV_PATH):
         print("No CSV data found. Exiting.")
@@ -448,6 +613,12 @@ def main():
     cfg["LAG_DAYS"] = 0 # lag is physically zero
 
     save_metrics_cache(cfg)
+
+    # Shadow-only until a full calibration window has accumulated.  Live tracker
+    # thresholds remain on the established cache path during this validation run.
+    write_shadow_calibration_artifact(df, calibration_seed_cfg)
+    validate_data.validate_calibration_artifacts(CALIBRATION_RUNS_PATH)
+    validate_data.validate_and_update_hashes(DATA_DIR)
 
     local_now = pd.Timestamp.now(tz='America/Chicago')
     commit_msg = f"Auto-tune [{local_now.strftime('%Y-%m-%d')}]: Walk-Forward. RB({msg_rb}) HO({msg_ho})"

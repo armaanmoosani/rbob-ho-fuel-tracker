@@ -6,6 +6,7 @@ import json
 import re
 import math
 from datetime import date, timedelta
+from calibration_artifacts import load_calibration_artifacts
 
 def get_good_friday(year):
     # Meeus/Jones/Butcher algorithm for Gregorian Easter
@@ -391,11 +392,24 @@ def validate_settlement_provenance(provenance_path):
             sys.exit(1)
     print("Settlement provenance validation: PASSED")
 
+
+def validate_calibration_artifacts(artifact_path):
+    if not os.path.exists(artifact_path):
+        return
+    try:
+        load_calibration_artifacts(artifact_path)
+    except Exception as e:
+        print(f"Data validation failed: Invalid calibration artifact ledger: {e}")
+        sys.exit(1)
+    print("Calibration artifact validation: PASSED")
+
 def validate_and_update_hashes(data_dir):
     hash_csv_path = os.path.join(data_dir, "integrity_hashes.csv")
     files_to_track = ["graves_history.csv", "config.json", "metrics_cache.json", "prediction_log.csv"]
     if os.path.exists(os.path.join(data_dir, "nymex_settlement_provenance.csv")):
         files_to_track.append("nymex_settlement_provenance.csv")
+    if os.path.exists(os.path.join(data_dir, "calibration_runs.jsonl")):
+        files_to_track.append("calibration_runs.jsonl")
     
     existing_records = []
     if os.path.exists(hash_csv_path):
@@ -530,10 +544,12 @@ def validate_all(data_dir=None):
     csv_path = os.path.join(data_dir, "graves_history.csv")
     log_path = os.path.join(data_dir, "prediction_log.csv")
     provenance_path = os.path.join(data_dir, "nymex_settlement_provenance.csv")
+    artifact_path = os.path.join(data_dir, "calibration_runs.jsonl")
     
     validate_graves_history(csv_path)
     validate_prediction_log(log_path)
     validate_settlement_provenance(provenance_path)
+    validate_calibration_artifacts(artifact_path)
     validate_and_update_hashes(data_dir)
 
 if __name__ == "__main__":

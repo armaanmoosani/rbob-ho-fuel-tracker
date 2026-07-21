@@ -56,6 +56,23 @@ those artifacts for all new replay and report calculations.
 5. Make replay require an artifact for the requested date; report `unknown`
    rather than silently substituting current cache values.
 
+## Implemented Shadow Phase
+
+The shadow phase is now active. `backtest.py` writes one append-only JSON Lines
+artifact for the next NYMEX business session after each nightly calibration.
+Each artifact hashes only its eligible training rows, records the selected
+calibration payload and prior smoothing artifact, and is validated and
+integrity-hashed in the same job. The one-session purge is applied between
+training and test blocks inside the walk-forward optimizer; a production
+artifact still includes the latest fully received rack outcome for the next
+session's decision.
+
+The existing `metrics_cache.json` path remains the live signal input during the
+shadow period. This is intentional: it avoids changing purchase decisions until
+there is a full rolling-window chain of artifacts to compare against the legacy
+path. `replay_day.py` now refuses to synthesize a historical calibration; dates
+without an artifact are explicitly reported as unknown.
+
 ## Regression Risks and Tests
 
 The highest risk is changing live thresholds because the old smoothing state is

@@ -8,12 +8,14 @@ import numpy as np
 # Ensure parent directory is in path
 sys.path.append(os.path.dirname(__file__))
 import backtest
+from calibration_artifacts import artifact_for_session, CalibrationArtifactUnavailable
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 CSV_PATH = os.path.join(DATA_DIR, "graves_history.csv")
 LOG_PATH = os.path.join(DATA_DIR, "prediction_log.csv")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 METRICS_CACHE_PATH = os.path.join(DATA_DIR, "metrics_cache.json")
+CALIBRATION_RUNS_PATH = os.path.join(DATA_DIR, "calibration_runs.jsonl")
 
 
 def load_config(config_path=None, metrics_cache_path=None):
@@ -43,31 +45,18 @@ def load_config(config_path=None, metrics_cache_path=None):
             pass
     return cfg
 
-def simulate_thresholds_at_date(df, target_date):
+def simulate_thresholds_at_date(df, target_date, artifact_path=None):
+    """Load the immutable calibration that was eligible for ``target_date``.
+
+    ``df`` remains in the signature for call-site compatibility, but is not used
+    to synthesize historical thresholds.  Recomputing from today's cache would
+    turn a replay into a forward-contaminated estimate.
     """
-    Simulates the daily stateful calibration walk-forward path from the beginning
-    of the history up to the night before target_date, reproducing the exact
-    live config thresholds.
-    """
-    cfg = load_config()
-    
-    df_sorted = df.sort_values('date').reset_index(drop=True)
-    # The night before target_date is the last day we include in calibration
-    df_slice = df_sorted[df_sorted['date'] < target_date].copy()
-    
-    min_rows = cfg["MIN_ROWS_FOR_TUNING"]
-    if len(df_slice) < min_rows:
-        return cfg
-        
-    print(f"Running new walk-forward threshold calibration on data up to {target_date}...")
-    
-    # Run optimization separately for RB and HO
-    cfg, _, rb_win = backtest.run_optimization(df_slice, 'nymex_rb', 'rack_u', 'RB', cfg)
-    cfg, _, ho_win = backtest.run_optimization(df_slice, 'nymex_ho', 'rack_d', 'HO', cfg)
-    
-    cfg["ROLLING_WINDOW_DAYS"] = rb_win
-    cfg["LAG_DAYS"] = 0
-    return cfg
+    del df
+    artifact = artifact_for_session(
+        artifact_path or CALIBRATION_RUNS_PATH, str(target_date)[:10]
+    )
+    return dict(artifact["calibration"])
 
 def main():
     parser = argparse.ArgumentParser(description="Deterministic Point-In-Time Replay Validation")
@@ -103,7 +92,11 @@ def main():
         sys.exit(1)
 
     # 2. Re-run stateful walk-forward calibration up to target_date
-    calibrated_cfg = simulate_thresholds_at_date(df_hist, target_date)
+    try:
+        calibrated_cfg = simulate_thresholds_at_date(df_hist, target_date)
+    except CalibrationArtifactUnavailable as exc:
+        print(f"Replay status: unknown. {exc}")
+        sys.exit(0)
     
     # 3. Verify predictions and check for leakages
     mismatches = 0
