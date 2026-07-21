@@ -91,6 +91,7 @@ TZ = pytz.timezone('America/Chicago')
 
 os.makedirs(REPORTS_DIR, exist_ok=True)
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
+MIN_LIVE_PREDICTIONS_FOR_SIGNIFICANCE = 30
 
 def load_config():
     defaults = {
@@ -105,6 +106,40 @@ def load_config():
         except Exception:
             pass
     return cfg
+
+
+def summarize_prediction_source(df_source, now_chicago, dispatch_rate):
+    alerts = df_source[df_source['predicted_direction'].isin(['HIKE', 'DROP'])].copy()
+    total_alerts = len(alerts)
+    savings_cents = float(alerts['savings_cents'].sum()) if total_alerts else 0.0
+    precision = float(alerts['is_correct'].sum() / total_alerts * 100) if total_alerts else 0.0
+    avg_savings = savings_cents / total_alerts if total_alerts else 0.0
+
+    week_alerts = alerts[alerts['timestamp_dt'] >= now_chicago - pd.Timedelta(days=7)]
+    week_count = len(week_alerts)
+    week_savings = float(week_alerts['savings_cents'].sum()) if week_count else 0.0
+    week_precision = float(week_alerts['is_correct'].sum() / week_count * 100) if week_count else 0.0
+
+    full_dollars = savings_cents / 100.0 * 8500
+    return {
+        "rows": len(df_source),
+        "alerts": total_alerts,
+        "precision": precision,
+        "savings_cents": savings_cents,
+        "avg_savings": avg_savings,
+        "full_dollars": full_dollars,
+        "estimated_dollars": full_dollars * dispatch_rate,
+        "week_alerts": week_count,
+        "week_precision": week_precision,
+        "week_savings": week_savings,
+    }
+
+
+def significance_available(live_prediction_count, resolved_live_count):
+    return (
+        live_prediction_count >= MIN_LIVE_PREDICTIONS_FOR_SIGNIFICANCE
+        and resolved_live_count >= MIN_LIVE_PREDICTIONS_FOR_SIGNIFICANCE
+    )
 
 
 def main():
@@ -122,6 +157,13 @@ def main():
     if len(log_df) == 0:
         print("No predictions logged yet.")
         return
+
+    # Normalize legacy source labels before validation/backfill writes.
+    if 'prediction_source' not in log_df.columns:
+        log_df['prediction_source'] = 'unlabelled'
+    log_df['prediction_source'] = log_df['prediction_source'].fillna('').astype(str).str.strip()
+    log_df.loc[~log_df['prediction_source'].isin(['live', 'backfill', 'unlabelled']), 'prediction_source'] = 'unlabelled'
+    log_df.loc[log_df['prediction_source'] == '', 'prediction_source'] = 'unlabelled'
 
     # Backfill PENDING outcomes
     updates_made = False
@@ -148,35 +190,52 @@ def main():
         log_df.to_csv(LOG_PATH, index=False)
         print("Backfilled PENDING outcomes.")
 
-    # Calculate Metrics
-    # Filter to only rows that have been resolved
-    df = log_df[log_df['actual_next_day_move_cents'] != 'PENDING'].copy()
-    df['actual_move'] = pd.to_numeric(df['actual_next_day_move_cents'], errors='coerce')
-    df = df.dropna(subset=['actual_move']).copy()
-    if len(df) == 0:
+    # Calculate metrics from resolved rows. Only recorded live predictions may
+    # support operational performance claims or the significance test.
+    resolved_df = log_df[log_df['actual_next_day_move_cents'] != 'PENDING'].copy()
+    resolved_df['actual_move'] = pd.to_numeric(resolved_df['actual_next_day_move_cents'], errors='coerce')
+    resolved_df = resolved_df.dropna(subset=['actual_move']).copy()
+    if len(resolved_df) == 0:
         print("No resolved predictions yet.")
         return
     
-    df['timestamp_dt'] = pd.to_datetime(df['timestamp'], format='ISO8601', utc=True).dt.tz_convert('America/Chicago')
-    df = df.sort_values('timestamp_dt').copy()
+    resolved_df['timestamp_dt'] = pd.to_datetime(resolved_df['timestamp'], format='ISO8601', utc=True).dt.tz_convert('America/Chicago')
+    resolved_df = resolved_df.sort_values('timestamp_dt').copy()
 
     # Vectorized calculation of savings and correctness
-    pred = df['predicted_direction']
-    actual = df['actual_move']
+    pred = resolved_df['predicted_direction']
+    actual = resolved_df['actual_move']
 
-    df['savings_cents'] = np.select(
+    resolved_df['savings_cents'] = np.select(
         [pred == 'HIKE', pred == 'DROP'],
         [actual, -actual],
         default=0.0
     )
 
-    df['is_correct'] = np.select(
+    resolved_df['is_correct'] = np.select(
         [pred == 'HIKE', pred == 'DROP'],
         [actual > 0, actual < 0],
         default=False
     )
 
-    df['cumulative_savings'] = df['savings_cents'].cumsum()
+    resolved_df['cumulative_savings'] = resolved_df['savings_cents'].cumsum()
+
+    now_chicago = pd.Timestamp.now(tz='America/Chicago')
+    cfg = load_config()
+    dispatch_rate = cfg.get("DISPATCH_SAME_DAY_RATE", 0.50)
+    live_df = resolved_df[resolved_df['prediction_source'] == 'live'].copy()
+    backfill_df = resolved_df[resolved_df['prediction_source'] == 'backfill'].copy()
+    unlabelled_df = resolved_df[resolved_df['prediction_source'] == 'unlabelled'].copy()
+    live_summary = summarize_prediction_source(live_df, now_chicago, dispatch_rate)
+    backfill_summary = summarize_prediction_source(backfill_df, now_chicago, dispatch_rate)
+    live_prediction_count = int((log_df['prediction_source'] == 'live').sum())
+    backfill_prediction_count = int((log_df['prediction_source'] == 'backfill').sum())
+    unlabelled_prediction_count = int((log_df['prediction_source'] == 'unlabelled').sum())
+
+    # All operational metrics below are intentionally restricted to recorded live rows.
+    df = live_df
+    pred = df['predicted_direction']
+    actual = df['actual_move']
 
     # Pre-calculate active alert metrics using direct sum filters
     correct_hikes = int(((pred == 'HIKE') & (actual > 0)).sum())
@@ -189,9 +248,6 @@ def main():
     df_alerts = df[df['predicted_direction'].isin(['HIKE', 'DROP'])].copy()
     total_active_alerts = len(df_alerts)
     
-    cfg = load_config()
-    dispatch_rate = cfg.get("DISPATCH_SAME_DAY_RATE", 0.50)
-    
     # Lifetime metrics
     lifetime_precision = (df_alerts['is_correct'].sum() / total_active_alerts * 100) if total_active_alerts > 0 else 0.0
     lifetime_savings_cents = df_alerts['savings_cents'].sum()
@@ -203,7 +259,6 @@ def main():
     avg_savings_per_truck_dollars = (avg_savings_per_active_alert_cents / 100.0) * TRUCK_GALLONS
     
     # Weekly metrics (Last 7 days activity)
-    now_chicago = pd.Timestamp.now(tz='America/Chicago')
     cutoff_7d = now_chicago - pd.Timedelta(days=7)
     
     # Filter resolved predictions in the last 7 calendar days
@@ -365,8 +420,8 @@ def main():
         except Exception as e:
             print(f"Error checking basis stability: {e}")
 
-    # Stable 180-Day Permutation Significance Testing
-    # Filter to last 180 days Chicago time (to avoid time zone differences)
+    # Stable 180-Day permutation test over recorded live predictions only.
+    # Backfilled estimates are deliberately excluded from operational claims.
     cutoff_date = pd.Timestamp.now(tz='America/Chicago') - pd.Timedelta(days=180)
     df_180 = df[df['timestamp_dt'] >= cutoff_date].copy()
     
@@ -378,11 +433,14 @@ def main():
         df_sig = df_180
         sig_period_str = "Last 180 Days"
         
-    p_value = 1.0
-    p_value_note = "Model significance could not be computed (insufficient resolved predictions)."
-    p_value_str = "N/A"
+    p_value = None
+    p_value_note = (
+        f"Live sample too small for statistical conclusions: "
+        f"{live_prediction_count} live predictions recorded; at least 30 are required."
+    )
+    p_value_str = "Not available"
     
-    if len(df_sig) >= 5:
+    if significance_available(live_prediction_count, len(df_sig)):
         real_sig_savings = 0.0
         pred_dirs = []
         actual_moves = []
@@ -451,7 +509,7 @@ def main():
         ax1.plot(trend_dates, trend, linestyle='--', color='#3b82f6', linewidth=2, label='Rolling Trend (5 alerts)')
 
     ax1.axhline(0, color='#94a3b8', linestyle='-', linewidth=1.2)
-    ax1.set_title('Expected Savings in Last 90 Days (¢/gal)', fontsize=13, fontweight='bold', color='#1e293b', pad=10)
+    ax1.set_title('Recorded Live Savings in Last 90 Days (¢/gal)', fontsize=13, fontweight='bold', color='#1e293b', pad=10)
     ax1.set_ylabel('Cents per Gallon Saved', fontsize=10, color='#475569')
     
     if len(plot_dates) > 10:
@@ -500,7 +558,7 @@ def main():
         for spine in ax2.spines.values():
             spine.set_color('#e2e8f0')
             
-    ax2.set_title('90-Day Rolling Alert Precision (%)', fontsize=13, fontweight='bold', color='#1e293b', pad=10)
+    ax2.set_title('Recorded Live 90-Day Alert Precision (%)', fontsize=13, fontweight='bold', color='#1e293b', pad=10)
     ax2.set_xlabel('Alert Date', fontsize=10, color='#475569')
     
     plt.tight_layout()
@@ -555,6 +613,7 @@ def main():
                             <td style="background-color: #f8fafc; padding: 24px; text-align: center; border-bottom: 1px solid #e2e8f0;">
                                 <h1 style="margin: 0; color: #0f172a; font-size: 24px; font-weight: 600; line-height: 1.2;">Weekly Performance Report</h1>
                                 <p style="margin: 8px 0 0 0; color: #64748b; font-size: 14px; font-weight: 500;">Graves Oil Predictive Engine</p>
+                                <p style="margin: 12px 0 0 0; padding: 10px; color: #92400e; background-color: #fffbeb; border: 1px solid #fcd34d; border-radius: 4px; font-size: 13px; font-weight: 700;">Recorded live predictions: {live_prediction_count} | Backfilled historical estimates: {backfill_prediction_count} | Unlabelled legacy rows: {unlabelled_prediction_count}</p>
                             </td>
                         </tr>
                         
@@ -563,7 +622,7 @@ def main():
                             <td style="padding: 32px 24px;">
                                 
                                 <!-- WEEKLY ACTIVITY SECTION -->
-                                <h2 style="color: #0f172a; font-size: 18px; margin: 0 0 16px 0; font-weight: 600; border-bottom: 2px solid #3b82f6; padding-bottom: 6px;">This Week's Activity (Last 7 Days)</h2>
+                                <h2 style="color: #0f172a; font-size: 18px; margin: 0 0 16px 0; font-weight: 600; border-bottom: 2px solid #3b82f6; padding-bottom: 6px;">Recorded Live Activity (Last 7 Days)</h2>
                                 <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 24px;">
                                     <tr>
                                         <td width="31%" align="center" style="background-color: #f8fafc; padding: 14px 8px; border-radius: 6px; border: 1px solid #e2e8f0;">
@@ -586,7 +645,7 @@ def main():
                                 </table>
 
                                 <!-- RECENT ALERTS LOG TABLE -->
-                                <h3 style="color: #334155; font-size: 14px; margin: 20px 0 8px 0; font-weight: 600;">Recent Resolved Alerts Log</h3>
+                                <h3 style="color: #334155; font-size: 14px; margin: 20px 0 8px 0; font-weight: 600;">Recent Resolved Live Alerts</h3>
                                 <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 28px; border-collapse: collapse;">
                                     <thead>
                                         <tr style="background-color: #f8fafc; border-bottom: 2px solid #e2e8f0; text-align: left;">
@@ -604,7 +663,7 @@ def main():
                                 </table>
 
                                 <!-- LIFETIME PERFORMANCE SECTION -->
-                                <h2 style="color: #0f172a; font-size: 18px; margin: 24px 0 16px 0; font-weight: 600; border-bottom: 2px solid #10b981; padding-bottom: 6px;">Lifetime Model Calibration Performance</h2>
+                                <h2 style="color: #0f172a; font-size: 18px; margin: 24px 0 16px 0; font-weight: 600; border-bottom: 2px solid #10b981; padding-bottom: 6px;">Recorded Live Performance</h2>
                                 <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 12px;">
                                     <tr>
                                         <td width="48%" align="center" style="background-color: #f8fafc; padding: 14px; border-radius: 6px; border: 1px solid #e2e8f0; margin-bottom: 12px; display: inline-block; vertical-align: top; width: 44%;">
@@ -636,6 +695,27 @@ def main():
                                     </tr>
                                 </table>
 
+                                <!-- BACKFILLED ESTIMATES SECTION -->
+                                <h2 style="color: #0f172a; font-size: 18px; margin: 24px 0 16px 0; font-weight: 600; border-bottom: 2px solid #f59e0b; padding-bottom: 6px;">Backfilled Historical Estimates (Not Live Performance)</h2>
+                                <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 24px;">
+                                    <tr>
+                                        <td width="31%" align="center" style="background-color: #fffbeb; padding: 14px 8px; border-radius: 6px; border: 1px solid #fcd34d;">
+                                            <div style="color: #92400e; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Resolved Estimates</div>
+                                            <div style="color: #78350f; font-size: 20px; font-weight: 700; margin-top: 6px;">{backfill_summary['rows']}</div>
+                                        </td>
+                                        <td width="3%"></td>
+                                        <td width="32%" align="center" style="background-color: #fffbeb; padding: 14px 8px; border-radius: 6px; border: 1px solid #fcd34d;">
+                                            <div style="color: #92400e; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Alert Precision</div>
+                                            <div style="color: #78350f; font-size: 20px; font-weight: 700; margin-top: 6px;">{backfill_summary['precision']:.1f}%</div>
+                                        </td>
+                                        <td width="3%"></td>
+                                        <td width="31%" align="center" style="background-color: #fffbeb; padding: 14px 8px; border-radius: 6px; border: 1px solid #fcd34d;">
+                                            <div style="color: #92400e; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Cum. Estimate Savings</div>
+                                            <div style="color: #78350f; font-size: 20px; font-weight: 700; margin-top: 6px;">{backfill_summary['savings_cents']:+.2f}¢/gal</div>
+                                        </td>
+                                    </tr>
+                                </table>
+
                                 <!-- EXECUTION DISCLAIMER & BENCHMARK NOTE -->
                                 <table width="100%" cellpadding="12" cellspacing="0" border="0" style="background-color: #fffbeb; border-left: 4px solid #f59e0b; border-right: 1px solid #fef3c7; border-top: 1px solid #fef3c7; border-bottom: 1px solid #fef3c7; border-radius: 4px; margin-bottom: 28px;">
                                     <tr>
@@ -652,7 +732,7 @@ def main():
                                 </table>
 
                                 <!-- Significance -->
-                                <h3 style="color: #334155; font-size: 16px; margin: 24px 0 12px 0; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; font-weight: 600;">Model Significance ({sig_period_str})</h3>
+                                <h3 style="color: #334155; font-size: 16px; margin: 24px 0 12px 0; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; font-weight: 600;">Recorded Live Prediction Significance ({sig_period_str})</h3>
                                 <table width="100%" cellpadding="14" cellspacing="0" border="0" style="background-color: #f8fafc; border-left: 4px solid #3b82f6; border-right: 1px solid #e2e8f0; border-top: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; border-radius: 4px; margin-bottom: 28px;">
                                     <tr>
                                         <td>
@@ -690,7 +770,7 @@ def main():
                                 </table>
 
                                 <!-- Confusion Matrix -->
-                                <h3 style="color: #334155; font-size: 16px; margin: 0 0 16px 0; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; font-weight: 600;">Prediction Confusion Matrix (Lifetime)</h3>
+                                <h3 style="color: #334155; font-size: 16px; margin: 0 0 16px 0; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; font-weight: 600;">Recorded Live Prediction Confusion Matrix</h3>
                                 <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 32px; font-size: 14px;">
                                     <tr style="border-bottom: 1px solid #f1f5f9;">
                                         <td style="padding: 12px 0; color: #475569;">Correct Hikes Predicted <span style="color: #94a3b8; font-size: 12px;">(Saved money)</span></td>
@@ -715,7 +795,7 @@ def main():
                                 </table>
 
                                 <!-- Chart -->
-                                <h3 style="color: #334155; font-size: 16px; margin: 0 0 16px 0; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; font-weight: 600;">Recent Performance Trends (Last 90 Days)</h3>
+                                <h3 style="color: #334155; font-size: 16px; margin: 0 0 16px 0; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; font-weight: 600;">Recorded Live Performance Trends (Last 90 Days)</h3>
                                 <table width="100%" cellpadding="0" cellspacing="0" border="0">
                                     <tr>
                                         <td align="center" style="border: 1px solid #e2e8f0; border-radius: 6px; padding: 12px; background-color: #f8fafc;">

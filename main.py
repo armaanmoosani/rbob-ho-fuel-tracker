@@ -137,38 +137,44 @@ TRUCK_GALLONS = 8500   # Standard truck load for dollar-value risk calculations
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 METRICS_CACHE_PATH = os.path.join(DATA_DIR, "metrics_cache.json")
-CONFIG_CORRUPT = False
-try:
-    with open(CONFIG_PATH, "r") as f:
-        APP_CONFIG = json.load(f)
-    print("Loaded config.json custom thresholds.")
-except Exception as e:
-    if os.path.exists(CONFIG_PATH):
-        CONFIG_CORRUPT = True
-    print(f"Warning: Could not load config.json, using defaults. ({e})")
-    APP_CONFIG = {
-        "MIN_ROWS_FOR_TUNING": 30,
-        "BLEND_ALPHA": 0.3,
-        "RB_HIKE_THRESHOLD_CENTS": 1.0,
-        "RB_DROP_THRESHOLD_CENTS": -1.0,
-        "HO_HIKE_THRESHOLD_CENTS": 1.0,
-        "HO_DROP_THRESHOLD_CENTS": -1.0,
-        "RB_LEAN_HIKE_CENTS": 0.5,
-        "RB_LEAN_DROP_CENTS": -0.5,
-        "HO_LEAN_HIKE_CENTS": 0.5,
-        "HO_LEAN_DROP_CENTS": -0.5,
-        "LAG_DAYS": 0
-    }
+DEFAULT_APP_CONFIG = {
+    "MIN_ROWS_FOR_TUNING": 30,
+    "BLEND_ALPHA": 0.3,
+    "RB_HIKE_THRESHOLD_CENTS": 1.0,
+    "RB_DROP_THRESHOLD_CENTS": -1.0,
+    "HO_HIKE_THRESHOLD_CENTS": 1.0,
+    "HO_DROP_THRESHOLD_CENTS": -1.0,
+    "RB_LEAN_HIKE_CENTS": 0.5,
+    "RB_LEAN_DROP_CENTS": -0.5,
+    "HO_LEAN_HIKE_CENTS": 0.5,
+    "HO_LEAN_DROP_CENTS": -0.5,
+    "LAG_DAYS": 0,
+}
 
-# Safe overlay of metrics_cache.json if it exists (Issue 1.1)
-if os.path.exists(METRICS_CACHE_PATH):
+
+def load_runtime_config(config_path=CONFIG_PATH, metrics_cache_path=METRICS_CACHE_PATH):
+    cfg = DEFAULT_APP_CONFIG.copy()
+    config_corrupt = False
     try:
-        with open(METRICS_CACHE_PATH, "r") as f:
-            metrics_cache = json.load(f)
-            APP_CONFIG.update(metrics_cache)
-        print("Successfully loaded and overlaid metrics_cache.json thresholds.")
+        with open(config_path, "r") as f:
+            cfg.update(json.load(f))
+        print("Loaded config.json custom thresholds.")
     except Exception as e:
-        print(f"Warning: Could not load metrics_cache.json, relying on config/defaults. ({e})")
+        if os.path.exists(config_path):
+            config_corrupt = True
+        print(f"Warning: Could not load config.json, using defaults. ({e})")
+
+    if os.path.exists(metrics_cache_path):
+        try:
+            with open(metrics_cache_path, "r") as f:
+                cfg.update(json.load(f))
+            print("Successfully loaded and overlaid metrics_cache.json thresholds.")
+        except Exception as e:
+            print(f"Warning: Could not load metrics_cache.json, relying on config/defaults. ({e})")
+    return cfg, config_corrupt
+
+
+APP_CONFIG, CONFIG_CORRUPT = load_runtime_config()
 
 def get_session_start(dt):
     if dt.hour >= 17:
@@ -524,8 +530,8 @@ def build_rack_signal(prefix, data, now):
             if not already_logged:
                 with open(log_path, "a") as f:
                     if not file_exists:
-                        f.write("timestamp,commodity,predicted_direction,nymex_move_cents,lag_used,window_used,threshold_used,actual_next_day_move_cents\n")
-                    f.write(f"{local_now.isoformat()},{prefix},FLAT,0.00,0,120,0.00,PENDING\n")
+                        f.write("timestamp,commodity,predicted_direction,nymex_move_cents,lag_used,window_used,threshold_used,actual_next_day_move_cents,prediction_source\n")
+                    f.write(f"{local_now.isoformat()},{prefix},FLAT,0.00,0,120,0.00,PENDING,live\n")
         except Exception as e:
             print(f"Failed to write prediction log: {e}")
 
@@ -551,54 +557,8 @@ def build_rack_signal(prefix, data, now):
     lean_drop = APP_CONFIG.get(f"{prefix}_LEAN_DROP_CENTS", -0.5)
     
     nymex_daily_std = APP_CONFIG.get(f"{prefix}_nymex_daily_std", 1.0)
-    
-    # Calculate intraday realized volatility to check for genuine session regime shifts.
-    #
-    # Methodology:
-    #   - Compute the sample std of observed 5-min price changes in cents (per-interval vol).
-    #   - Derive the expected per-interval vol from the historical close-to-close daily std:
-    #       expected_interval_vol = nymex_daily_std / sqrt(GLOBEX_5MIN_INTERVALS)
-    #     (close-to-close daily std / sqrt(204) = expected 5-min move std assuming i.i.d.)
-    #   - The override fires ONLY when observed per-interval vol > 2× the expected baseline,
-    #     indicating a true intraday regime shift, not ordinary sampling noise.
-    #   - Minimum 36 intervals (3 hours) required for a stable std estimate; with n<36 the
-    #     95% CI on std(ddof=1) is too wide (>±45%) to distinguish regime shifts from noise.
-    #   - When the override fires, the full-session vol estimate is std_diffs * sqrt(204).
-    _GLOBEX_5MIN_INTERVALS = 204   # 17h × 12 five-minute intervals
-    _MIN_INTRADAY_INTERVALS = 36   # 3 hours minimum for a stable std estimate
-    _VOL_OVERRIDE_SIGMA = 2.0      # require 2× expected per-interval vol to trigger
-    realized_vol = None
-    schwab_symbol = data.get('schwab_symbol')
-    if schwab_symbol:
-        try:
-            history_key = contract_state_prefix(prefix, schwab_symbol)
-            history_intra = load_price_history(history_key)
-            if len(history_intra) >= _MIN_INTRADAY_INTERVALS:
-                prices = [h['p'] for h in history_intra]
-                diffs = [(prices[i] - prices[i-1]) * 100 for i in range(1, len(prices))]
-                if len(diffs) >= _MIN_INTRADAY_INTERVALS - 1:
-                    std_diffs = float(np.std(diffs, ddof=1))
-                    # Expected per-5-min vol from historical close-to-close daily std.
-                    # Dividing daily std by sqrt(204) gives the per-interval baseline.
-                    # This is conservative because close-to-close std includes overnight
-                    # gap variance (~30-50% of total energy futures daily variance), so
-                    # the per-interval baseline is slightly overstated, making the 2×
-                    # threshold harder to cross and reducing false positives.
-                    expected_interval_vol = nymex_daily_std / np.sqrt(_GLOBEX_5MIN_INTERVALS)
-                    if std_diffs > _VOL_OVERRIDE_SIGMA * expected_interval_vol:
-                        # Genuine intraday regime shift confirmed: scale to full-session vol
-                        realized_vol = std_diffs * np.sqrt(_GLOBEX_5MIN_INTERVALS)
-        except Exception as vol_e:
-            print(f"[{prefix}] Failed to compute realized volatility: {vol_e}")
-            
-    used_std = nymex_daily_std
-    vol_override_msg = ""
-    if realized_vol is not None and realized_vol > nymex_daily_std:
-        used_std = realized_vol
-        vol_override_msg = f" (dynamic intraday vol override: {realized_vol:.2f}c vs historical {nymex_daily_std:.2f}c)"
-        print(f"[{prefix}] Intraday regime shift detected! Volatility override active: {realized_vol:.4f} cents.")
 
-    z_score = change_cents / used_std if used_std > 0 else 0.0
+    z_score = change_cents / nymex_daily_std if nymex_daily_std > 0 else 0.0
     abs_z = abs(z_score)
     
     if abs_z >= 1.5:
@@ -680,12 +640,6 @@ def build_rack_signal(prefix, data, now):
             f"Defer purchase only if inventory capacity allows."
         )
 
-    if vol_override_msg:
-        if risk_text:
-            risk_text += vol_override_msg
-        else:
-            risk_text = f"Intraday Note:{vol_override_msg}"
-            
     decoupling_warn = get_decoupling_warning(prefix, now)
     if decoupling_warn:
         risk_text += decoupling_warn
@@ -716,14 +670,14 @@ def build_rack_signal(prefix, data, now):
         if not already_logged:
             with open(log_path, "a") as f:
                 if not file_exists:
-                    f.write("timestamp,commodity,predicted_direction,nymex_move_cents,lag_used,window_used,threshold_used,actual_next_day_move_cents\n")
+                    f.write("timestamp,commodity,predicted_direction,nymex_move_cents,lag_used,window_used,threshold_used,actual_next_day_move_cents,prediction_source\n")
                 
                 direction = "HIKE" if "BUY" in action else "DROP" if "WAIT" in action else "FLAT"
                 thresh = hike_thresh if "BUY" in action else drop_thresh if "WAIT" in action else 0.0
                 lag = APP_CONFIG.get("LAG_DAYS", 0)
                 window = APP_CONFIG.get("ROLLING_WINDOW_DAYS", 120)
                 
-                f.write(f"{local_now.isoformat()},{prefix},{direction},{change_cents:.2f},{lag},{window},{thresh:.2f},PENDING\n")
+                f.write(f"{local_now.isoformat()},{prefix},{direction},{change_cents:.2f},{lag},{window},{thresh:.2f},PENDING,live\n")
     except Exception as e:
         print(f"Failed to write prediction log: {e}")
 
@@ -1349,6 +1303,29 @@ def send_once_today(key, subject, all_data, now, alert_context):
         print(f"Warning: could not save lock {db_key}: {e}")
 
 
+def merge_alert_state_updates(base_state, updates):
+    merged_state = dict(base_state)
+    for update in updates:
+        merged_state.update(update)
+    return merged_state
+
+
+def fetch_all_commodities(now, access_token, alert_state):
+    all_data = {}
+    alert_state_updates = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(COMMODITIES)) as executor:
+        futures = [
+            executor.submit(fetch_commodity, prefix, cfg, now, access_token, alert_state)
+            for prefix, cfg in COMMODITIES.items()
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            if result:
+                alert_state_updates.append(result.pop('_alert_state_updates', {}))
+                all_data[result.pop('prefix')] = result
+    return all_data, alert_state_updates
+
+
 def main():
     # Assert Chicago timezone is correctly recognized (Issue 10.1)
     assert TZ.zone == 'America/Chicago', "TimeZone mismatch: America/Chicago expected."
@@ -1395,13 +1372,13 @@ def main():
             except Exception as e:
                 raise RuntimeError(f"CRITICAL: Schwab token refresh succeeded but updating GitHub Secrets failed: {mask_sensitive_text(e)}")
 
-    all_data = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(COMMODITIES)) as executor:
-        futures = [executor.submit(fetch_commodity, prefix, cfg, now, access_token) for prefix, cfg in COMMODITIES.items()]
-        for future in concurrent.futures.as_completed(futures):
-            res = future.result()
-            if res:
-                all_data[res.pop('prefix')] = res
+    alert_state = load_alert_state()
+    all_data, alert_state_updates = fetch_all_commodities(now, access_token, alert_state)
+    if alert_state_updates:
+        try:
+            save_alert_state(merge_alert_state_updates(alert_state, alert_state_updates))
+        except Exception as e:
+            print(f"Warning: could not save merged active symbols to alert state: {e}")
 
     session_str = get_session_date_str(now)
     if 'RB' not in all_data and 'HO' not in all_data:
@@ -1662,9 +1639,10 @@ def resolve_active_schwab_symbol(prefix, now, access_token, candidate_months=4):
     return candidates[0]
 
 
-def fetch_commodity(prefix, cfg, now, access_token):
+def fetch_commodity(prefix, cfg, now, access_token, alert_state=None):
     # Retrieve or resolve the active symbol for the session to ensure consistency
-    state = load_alert_state()
+    state = alert_state if alert_state is not None else load_alert_state()
+    alert_state_updates = {}
     session_str = get_session_date_str(now)
     cache_key = f"ACTIVE_SYMBOL_{prefix}_{session_str}"
     
@@ -1758,22 +1736,14 @@ def fetch_commodity(prefix, cfg, now, access_token):
             print(f"[{prefix}] Using cached active symbol for session {session_str}: {schwab_symbol}")
         else:
             schwab_symbol = resolve_active_schwab_symbol(prefix, now, access_token)
-            state[cache_key] = schwab_symbol
-            try:
-                save_alert_state(state)
-                print(f"[{prefix}] Re-resolved and cached active symbol for session {session_str}: {schwab_symbol}")
-            except Exception as e:
-                print(f"Warning: could not save active symbol to alert state: {e}")
+            alert_state_updates[cache_key] = schwab_symbol
+            print(f"[{prefix}] Re-resolved active symbol for session {session_str}: {schwab_symbol}")
     else:
         if on_roll_day:
             print(f"[{prefix}] Session roll day — bypassing stale cache and re-resolving by live Schwab volume.")
         schwab_symbol = resolve_active_schwab_symbol(prefix, now, access_token)
-        state[cache_key] = schwab_symbol
-        try:
-            save_alert_state(state)
-            print(f"[{prefix}] Resolved and cached active symbol for session {session_str}: {schwab_symbol}")
-        except Exception as e:
-            print(f"Warning: could not save active symbol to alert state: {e}")
+        alert_state_updates[cache_key] = schwab_symbol
+        print(f"[{prefix}] Resolved active symbol for session {session_str}: {schwab_symbol}")
 
             
     dynamic_yf_symbol = schwab_to_yfinance_symbol(schwab_symbol)
@@ -1994,6 +1964,7 @@ def fetch_commodity(prefix, cfg, now, access_token):
     print(f"[{prefix}] Fetched: ${current_price:.4f} ({daily_pct:+.2f}%)")
     return {
         'prefix': prefix,
+        '_alert_state_updates': alert_state_updates,
         'current_price': current_price,
         'open_price': open_price,
         'high_price': high_price,

@@ -11,23 +11,25 @@ import matplotlib.gridspec as gridspec
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 REPORTS_DIR = os.path.join(os.path.dirname(__file__), "reports")
 CSV_PATH = os.path.join(DATA_DIR, "graves_history.csv")
+CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
+METRICS_CACHE_PATH = os.path.join(DATA_DIR, "metrics_cache.json")
 
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
-def load_config():
+def load_config(config_path=None, metrics_cache_path=None):
     cfg = {}
     import json
-    config_path = os.path.join(DATA_DIR, "config.json")
+    config_path = config_path or CONFIG_PATH
+    metrics_cache_path = metrics_cache_path or METRICS_CACHE_PATH
     if os.path.exists(config_path):
         try:
             with open(config_path, "r") as f:
                 cfg.update(json.load(f))
         except Exception:
             pass
-    metrics_path = os.path.join(DATA_DIR, "metrics_cache.json")
-    if os.path.exists(metrics_path):
+    if os.path.exists(metrics_cache_path):
         try:
-            with open(metrics_path, "r") as f:
+            with open(metrics_cache_path, "r") as f:
                 cfg.update(json.load(f))
         except Exception:
             pass
@@ -291,15 +293,9 @@ def main():
     # ─── 6. SHADOW BENCHMARKS ─────────────────────────────────────────────────
     print("\n--- 6. Shadow Benchmarks (vs Naive Strategies) ---")
     # Load live config thresholds
-    config_path = os.path.join(DATA_DIR, "config.json")
-    import json
-    try:
-        with open(config_path) as f:
-            cfg = json.load(f)
-        live_hike = cfg.get('RB_HIKE_THRESHOLD_CENTS', 1.0)
-        live_drop = cfg.get('RB_DROP_THRESHOLD_CENTS', -1.0)
-    except Exception:
-        live_hike = 1.89; live_drop = -0.76
+    cfg = load_config()
+    live_hike = cfg.get('RB_HIKE_THRESHOLD_CENTS', 1.0)
+    live_drop = cfg.get('RB_DROP_THRESHOLD_CENTS', -1.0)
 
     live_sav, live_prec, live_n, live_per = run_simulation(
         df_clean, live_hike, live_drop, 'nymex_rb', 'rack_u')

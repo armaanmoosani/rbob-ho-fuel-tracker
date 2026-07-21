@@ -105,11 +105,24 @@ class TestValidateData(unittest.TestCase):
             "timestamp": ["2026-05-20T12:00:00-05:00", "2026-05-21T12:00:00-05:00"],
             "commodity": ["RB", "HO"],
             "predicted_direction": ["HIKE", "DROP"],
-            "actual_next_day_move_cents": ["PENDING", "1.5"]
+            "actual_next_day_move_cents": ["PENDING", "1.5"],
+            "prediction_source": ["live", "backfill"]
         })
         df.to_csv(self.log_path, index=False)
         # Should not raise exception
         validate_data.validate_prediction_log(self.log_path)
+
+    def test_validate_prediction_log_invalid_source(self):
+        df = pd.DataFrame({
+            "timestamp": ["2026-05-20T12:00:00-05:00"],
+            "commodity": ["RB"],
+            "predicted_direction": ["HIKE"],
+            "actual_next_day_move_cents": ["PENDING"],
+            "prediction_source": ["estimated"]
+        })
+        df.to_csv(self.log_path, index=False)
+        with self.assertRaises(SystemExit):
+            validate_data.validate_prediction_log(self.log_path)
 
     def test_validate_graves_history_negative_price(self):
         df = pd.DataFrame({

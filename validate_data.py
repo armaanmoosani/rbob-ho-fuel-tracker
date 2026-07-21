@@ -243,7 +243,7 @@ def validate_prediction_log(log_path):
         print(f"Data validation failed: Failed to read prediction log CSV. Error: {e}")
         sys.exit(1)
 
-    required_cols = ["timestamp", "commodity", "predicted_direction", "actual_next_day_move_cents"]
+    required_cols = ["timestamp", "commodity", "predicted_direction", "actual_next_day_move_cents", "prediction_source"]
     for col in required_cols:
         if col not in df.columns:
             print(f"Data validation failed: Missing column '{col}' in prediction log CSV.")
@@ -259,6 +259,12 @@ def validate_prediction_log(log_path):
     if not df['commodity'].isin(valid_comms).all():
         invalid = df[~df['commodity'].isin(valid_comms)]['commodity'].unique()
         print(f"Data validation failed: Invalid commodity value(s) found in prediction log: {invalid}")
+        sys.exit(1)
+
+    valid_sources = {"live", "backfill", "unlabelled"}
+    if not df['prediction_source'].isin(valid_sources).all():
+        invalid = df[~df['prediction_source'].isin(valid_sources)]['prediction_source'].unique()
+        print(f"Data validation failed: Invalid prediction source(s) found in prediction log: {invalid}")
         sys.exit(1)
 
     for idx, val in enumerate(df['actual_next_day_move_cents']):

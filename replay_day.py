@@ -1,6 +1,7 @@
 import os
 import sys
 import argparse
+import json
 import pandas as pd
 import numpy as np
 
@@ -11,13 +12,11 @@ import backtest
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 CSV_PATH = os.path.join(DATA_DIR, "graves_history.csv")
 LOG_PATH = os.path.join(DATA_DIR, "prediction_log.csv")
+CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
+METRICS_CACHE_PATH = os.path.join(DATA_DIR, "metrics_cache.json")
 
-def simulate_thresholds_at_date(df, target_date):
-    """
-    Simulates the daily stateful calibration walk-forward path from the beginning
-    of the history up to the night before target_date, reproducing the exact
-    live config thresholds.
-    """
+
+def load_config(config_path=None, metrics_cache_path=None):
     cfg = {
         "MIN_ROWS_FOR_TUNING": 30,
         "BLEND_ALPHA": 0.3,
@@ -30,8 +29,27 @@ def simulate_thresholds_at_date(df, target_date):
         "HO_LEAN_HIKE_CENTS": 0.5,
         "HO_LEAN_DROP_CENTS": -0.5,
         "LAG_DAYS": 0,
-        "ROLLING_WINDOW_DAYS": 120
+        "ROLLING_WINDOW_DAYS": 120,
     }
+    config_path = config_path or CONFIG_PATH
+    metrics_cache_path = metrics_cache_path or METRICS_CACHE_PATH
+    for path in (config_path, metrics_cache_path):
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r") as f:
+                cfg.update(json.load(f))
+        except Exception:
+            pass
+    return cfg
+
+def simulate_thresholds_at_date(df, target_date):
+    """
+    Simulates the daily stateful calibration walk-forward path from the beginning
+    of the history up to the night before target_date, reproducing the exact
+    live config thresholds.
+    """
+    cfg = load_config()
     
     df_sorted = df.sort_values('date').reset_index(drop=True)
     # The night before target_date is the last day we include in calibration

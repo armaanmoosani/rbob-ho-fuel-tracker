@@ -755,8 +755,10 @@ class TestCategory9AlertLogic(unittest.TestCase):
         change = 0.0
         self.assertFalse(change >= hike and change <= drop)
 
+    @patch('main.load_alert_state', return_value={})
+    @patch('main.load_settlement_snapshot', return_value=None)
     @patch('main.is_contract_roll_day')
-    def test_9_5_roll_day_suppression_regardless_of_move(self, mock_roll_check):
+    def test_9_5_roll_day_suppression_regardless_of_move(self, mock_roll_check, mock_snapshot, mock_alert_state):
         mock_roll_check.return_value = True
         
         # Even with a massive 10.0 cent move (normally BUY_NOW with High Conviction)
@@ -997,6 +999,10 @@ class TestCategory11AlertFormatting(unittest.TestCase):
             shutil.copy(orig_config_path, self.temp_dir)
             
         main.DATA_DIR = self.temp_dir
+        self.snapshot_patcher = patch('main.load_settlement_snapshot', return_value=None)
+        self.snapshot_patcher.start()
+        self.alert_state_patcher = patch('main.load_alert_state', return_value={})
+        self.alert_state_patcher.start()
         
         self.orig_config = main.APP_CONFIG.copy()
         main.APP_CONFIG.update({
@@ -1028,6 +1034,8 @@ class TestCategory11AlertFormatting(unittest.TestCase):
 
     def tearDown(self):
         import main
+        self.alert_state_patcher.stop()
+        self.snapshot_patcher.stop()
         main.DATA_DIR = self.orig_main_data_dir
         main.APP_CONFIG = self.orig_config
         shutil.rmtree(self.temp_dir)
@@ -1240,9 +1248,10 @@ class TestCategory12ProductionFailureProtection(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         self.assertEqual(lines[1], "2026-05-18,2.10,2.20,2.30,2.40,2.50")
 
+    @patch('main.load_settlement_snapshot', return_value=None)
     @patch('main.CONFIG_PATH')
     @patch('main.CONFIG_CORRUPT', True)
-    def test_12_3_config_rollback(self, mock_path):
+    def test_12_3_config_rollback(self, mock_path, mock_snapshot):
         # Verify build_rack_signal displays corrupt warning when CONFIG_CORRUPT is True
         data = {
             'current_price': 2.20,
@@ -1260,8 +1269,10 @@ class TestCategory12ProductionFailureProtection(unittest.TestCase):
         signal = main.build_rack_signal('RB', data, datetime.now())
         self.assertIn("WARNING: Corrupt config.json detected!", signal['risk_text'])
 
+    @patch('main.load_alert_state', return_value={})
+    @patch('main.load_settlement_snapshot', return_value=None)
     @patch('main.is_contract_roll_day')
-    def test_12_4_nymex_contract_roll_boundary(self, mock_roll_check):
+    def test_12_4_nymex_contract_roll_boundary(self, mock_roll_check, mock_snapshot, mock_alert_state):
         mock_roll_check.return_value = True
         data = {
             'current_price': 2.20,
@@ -1281,9 +1292,16 @@ class TestCategory12ProductionFailureProtection(unittest.TestCase):
         self.assertEqual(signal['label'], 'Contract roll boundary')
         self.assertIn("roll price gaps", signal['text'])
 
-    @patch('yfinance.Ticker')
+    @patch('main.save_price_history')
+    @patch('main.load_price_history', return_value=[])
+    @patch('time.sleep')
+    @patch('main.resolve_active_schwab_symbol', return_value='/RBM26')
+    @patch('main.save_alert_state')
+    @patch('main.load_alert_state', return_value={})
+    @patch('main.requests.get', side_effect=RuntimeError('Schwab unavailable in unit test'))
+    @patch('main.yf.Ticker')
     @patch('main.previous_nymex_business_day')
-    def test_12_5_yfinance_stale_cache_fallback(self, mock_prev_day, mock_ticker):
+    def test_12_5_yfinance_stale_cache_fallback(self, mock_prev_day, mock_ticker, mock_get, mock_load, mock_save, mock_resolve, mock_sleep, mock_load_history, mock_save_history):
         # Mock yesterday's date as 2026-05-21, but yfinance history returns last date 2026-05-20 (stale)
         mock_prev_day.return_value = datetime(2026, 5, 21).date()
         
@@ -1369,10 +1387,14 @@ class TestCategory12ProductionFailureProtection(unittest.TestCase):
         self.assertEqual(resolved, '/RBN26', "With early_roll_days=3, May 27 session is in the roll window — should advance to July")
 
 
+    @patch('main.save_price_history')
+    @patch('main.load_price_history', return_value=[])
+    @patch('main.save_alert_state')
+    @patch('main.load_alert_state', return_value={})
     @patch('main.yf.Ticker')
     @patch('main.requests.get')
     @patch('main.resolve_active_schwab_symbol')
-    def test_12_5b_fetch_commodity_uses_active_schwab_primary(self, mock_resolve, mock_get, mock_ticker):
+    def test_12_5b_fetch_commodity_uses_active_schwab_primary(self, mock_resolve, mock_get, mock_ticker, mock_load_alert, mock_save_alert, mock_load_history, mock_save_history):
         mock_resolve.return_value = '/RBM26'
 
         mock_response = MagicMock()
@@ -1409,12 +1431,14 @@ class TestCategory12ProductionFailureProtection(unittest.TestCase):
         self.assertEqual(res['current_price'], 2.20)
         mock_resolve.assert_called_once_with('RB', datetime(2026, 5, 22, 12, 0, tzinfo=pytz.utc), 'token')
 
+    @patch('main.save_price_history')
+    @patch('main.load_price_history', return_value=[])
     @patch('main.save_alert_state')
     @patch('main.load_alert_state')
     @patch('main.yf.Ticker')
     @patch('main.requests.get')
     @patch('main.resolve_active_schwab_symbol')
-    def test_12_5c_fetch_commodity_uses_cached_active_symbol(self, mock_resolve, mock_get, mock_ticker, mock_load, mock_save):
+    def test_12_5c_fetch_commodity_uses_cached_active_symbol(self, mock_resolve, mock_get, mock_ticker, mock_load, mock_save, mock_load_history, mock_save_history):
         # Cache has '/RBN26' for the session 2026-05-22
         mock_load.return_value = {
             'ACTIVE_SYMBOL_RB_2026-05-22': '/RBN26'
@@ -1454,12 +1478,14 @@ class TestCategory12ProductionFailureProtection(unittest.TestCase):
         self.assertEqual(res['current_price'], 2.20)
         mock_resolve.assert_not_called()
 
+    @patch('main.save_price_history')
+    @patch('main.load_price_history', return_value=[])
     @patch('main.save_alert_state')
     @patch('main.load_alert_state')
     @patch('main.yf.Ticker')
     @patch('main.requests.get')
     @patch('main.resolve_active_schwab_symbol')
-    def test_12_5c_fetch_commodity_resolves_and_caches_active_symbol_if_empty(self, mock_resolve, mock_get, mock_ticker, mock_load, mock_save):
+    def test_12_5c_fetch_commodity_resolves_and_caches_active_symbol_if_empty(self, mock_resolve, mock_get, mock_ticker, mock_load, mock_save, mock_load_history, mock_save_history):
         mock_load.return_value = {}
         mock_resolve.return_value = '/RBN26'
 
@@ -1495,18 +1521,17 @@ class TestCategory12ProductionFailureProtection(unittest.TestCase):
 
         self.assertEqual(res['schwab_symbol'], '/RBN26')
         mock_resolve.assert_called_once_with('RB', datetime(2026, 5, 22, 12, 0, tzinfo=pytz.utc), 'token')
-        mock_save.assert_called_once()
-        saved_state = mock_save.call_args[0][0]
-        self.assertEqual(saved_state['ACTIVE_SYMBOL_RB_2026-05-22'], '/RBN26')
+        mock_save.assert_not_called()
+        self.assertEqual(
+            res['_alert_state_updates']['ACTIVE_SYMBOL_RB_2026-05-22'],
+            '/RBN26'
+        )
 
-    @patch('main.load_price_history')
+    @patch('main.load_settlement_snapshot', return_value=None)
+    @patch('main.load_price_history', side_effect=AssertionError('signal construction must not read intraday history'))
     @patch('main.APP_CONFIG')
-    def test_12_9_intraday_volatility_override(self, mock_config, mock_load_history):
-        # Setup config: nymex_daily_std = 1.0 cent (very low historical vol baseline).
-        # expected_interval_vol = 1.0 / sqrt(204) ≈ 0.070¢ per 5-min interval.
-        # Override threshold = 2× 0.070 = 0.140¢ per interval.
-        # The mock data alternates ±10¢ per interval → std_diffs ≈ 10¢ >> 0.140¢,
-        # so the regime-shift override WILL fire and lower the Z-score to Low Conviction.
+    def test_12_9_z_score_uses_calibrated_daily_std(self, mock_config, mock_load_history, mock_snapshot):
+        # The calibrated daily standard deviation is the sole Z-score denominator.
         mock_config.get.side_effect = lambda key, default=None: {
             'RB_HIKE_THRESHOLD_CENTS': 1.0,
             'RB_DROP_THRESHOLD_CENTS': -1.0,
@@ -1514,14 +1539,6 @@ class TestCategory12ProductionFailureProtection(unittest.TestCase):
             'RB_LEAN_DROP_CENTS': -0.5,
             'RB_nymex_daily_std': 1.0
         }.get(key, default)
-
-        # 36 data points (3 hours at 5-min intervals) — the new minimum required.
-        # Alternating 2.00/2.10 produces ±10¢ per-interval moves.
-        mock_load_history.return_value = [
-            {"t": f"2026-05-23T{9 + i // 12:02d}:{(i % 12) * 5:02d}:00",
-             "p": 2.00 if i % 2 == 0 else 2.10}
-            for i in range(36)
-        ]
 
         data = {
             'current_price': 2.10,
@@ -1532,10 +1549,9 @@ class TestCategory12ProductionFailureProtection(unittest.TestCase):
 
         signal = main.build_rack_signal('RB', data, datetime(2026, 5, 23, 13, 0))
 
-        # change_cents = 10.0¢; realized_vol ≈ 10 * sqrt(204) ≈ 142.8¢
-        # Z-score = 10.0 / 142.8 ≈ 0.07 → Low Conviction (|Z| < 1.0)
-        self.assertEqual(signal['conviction'], 'Low Conviction')
-        self.assertIn("dynamic intraday vol override", signal['risk_text'])
+        self.assertAlmostEqual(signal['z_score'], 10.0)
+        self.assertEqual(signal['conviction'], 'High Conviction')
+        self.assertNotIn("dynamic intraday vol override", signal['risk_text'])
 
     @patch('main.get_repo_variable')
     @patch('main.set_repo_variable')
@@ -2018,6 +2034,7 @@ class TestCategory15PredictionLog(unittest.TestCase):
             self.assertTrue(os.path.exists(self.log_path))
             df1 = pd.read_csv(self.log_path)
             self.assertEqual(len(df1), 1)
+            self.assertEqual(df1.loc[0, 'prediction_source'], 'live')
             
             main.build_rack_signal('RB', data, now)
             
@@ -2411,4 +2428,3 @@ class TestCategory20SecretMasking(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

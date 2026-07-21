@@ -19,9 +19,9 @@ def main(data_dir=None):
         
     # Standardize columns
     if 'prediction_source' not in df.columns:
-        df['prediction_source'] = 'live'
+        df['prediction_source'] = 'unlabelled'
     else:
-        df['prediction_source'] = df['prediction_source'].fillna('live')
+        df['prediction_source'] = df['prediction_source'].fillna('unlabelled')
         
     # We want live predictions that have been resolved (not PENDING)
     df_live = df[

@@ -43,8 +43,8 @@ def main():
         
     # Standardize/ensure prediction_source exists
     if 'prediction_source' not in df_log.columns:
-        df_log['prediction_source'] = 'live'
-    df_log['prediction_source'] = df_log['prediction_source'].fillna('live')
+        df_log['prediction_source'] = 'unlabelled'
+    df_log['prediction_source'] = df_log['prediction_source'].fillna('unlabelled')
     
     # Parse existing log dates for matching
     df_log['date_only'] = df_log['timestamp'].apply(lambda x: x.split('T')[0] if isinstance(x, str) else "")
@@ -200,8 +200,8 @@ def main():
         if not existing_log_df.empty:
             # Ensure existing log has prediction_source
             if 'prediction_source' not in existing_log_df.columns:
-                existing_log_df['prediction_source'] = 'live'
-            existing_log_df['prediction_source'] = existing_log_df['prediction_source'].fillna('live')
+                existing_log_df['prediction_source'] = 'unlabelled'
+            existing_log_df['prediction_source'] = existing_log_df['prediction_source'].fillna('unlabelled')
             
             final_df = pd.concat([existing_log_df, df_to_append], ignore_index=True)
         else:
