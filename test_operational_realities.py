@@ -64,7 +64,8 @@ class TestPredictionSourceReporting(unittest.TestCase):
             persist_step.index('git commit -m "Record live fuel provenance"'),
             persist_step.index("git pull --rebase origin main"),
         )
-        self.assertIn("git add data/prediction_log.csv data/daily_settlement.json", persist_step)
+        self.assertIn("git add data/prediction_log.csv", persist_step)
+        self.assertIn("[ -f data/daily_settlement.json ]", persist_step)
 
     def test_policy_savings_formula_is_identical_for_hike_drop_and_flat(self):
         savings = weekly_report.policy_savings_cents(
