@@ -1,0 +1,46 @@
+name: Contract History Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: First Graves history date to verify (YYYY-MM-DD)
+        required: true
+        default: "2026-05-20"
+      end_date:
+        description: Last Graves history date to verify (YYYY-MM-DD)
+        required: true
+        default: "2026-07-20"
+
+concurrency:
+  group: rbob-tracker
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests==2.31.0 pynacl==1.5.0 pandas_market_calendars==4.4.0
+
+      - name: Compare stored prices with Schwab contract history
+        env:
+          SCHWAB_APP_KEY: ${{ secrets.SCHWAB_APP_KEY }}
+          SCHWAB_APP_SECRET: ${{ secrets.SCHWAB_APP_SECRET }}
+          SCHWAB_REFRESH_TOKEN: ${{ secrets.SCHWAB_REFRESH_TOKEN }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_REPO: ${{ github.repository }}
+        run: >-
+          python audit_contract_history.py
+          --start "${{ inputs.start_date }}"
+          --end "${{ inputs.end_date }}"
