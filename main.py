@@ -227,6 +227,11 @@ def schwab_to_yfinance_symbol(schwab_symbol):
 def contract_state_prefix(prefix, schwab_symbol):
     return f"{prefix}_{schwab_symbol.lstrip('/').upper()}"
 
+
+def graves_nymex_column_index(prefix):
+    """Return the CSV settlement column only for commodities the file stores."""
+    return {"RB": 1, "HO": 2}.get(prefix)
+
 def get_github_session():
     session = requests.Session()
     retry = Retry(
@@ -2024,9 +2029,9 @@ def fetch_commodity(prefix, cfg, now, access_token, alert_state=None):
     # Read CSV for historical stats (SMA, range) — but NOT as the daily baseline
     # when Schwab data is available, to avoid cross-contract comparison after a roll.
     try:
-        col_idx = 1 if prefix == "RB" else 2
+        col_idx = graves_nymex_column_index(prefix)
         csv_file_path = os.path.join(DATA_DIR, "graves_history.csv")
-        if os.path.exists(csv_file_path):
+        if col_idx is not None and os.path.exists(csv_file_path):
             hist_records = []
             with open(csv_file_path, "r", encoding="utf-8") as f:
                 reader = csv.reader(f)

@@ -177,6 +177,13 @@ class TestConfigurationOverlayConsistency(unittest.TestCase):
 
 
 class TestContractProvenance(unittest.TestCase):
+    def test_graves_history_is_never_used_as_a_crude_oil_baseline(self):
+        import main
+
+        self.assertEqual(main.graves_nymex_column_index("RB"), 1)
+        self.assertEqual(main.graves_nymex_column_index("HO"), 2)
+        self.assertIsNone(main.graves_nymex_column_index("CL"))
+
     def test_mismatched_snapshot_and_baseline_suppresses_live_signal_and_logs_identity(self):
         import main
 
