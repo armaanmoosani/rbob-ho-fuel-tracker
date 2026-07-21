@@ -17,6 +17,13 @@ from replay_day import simulate_thresholds_at_date
 DATA_DIR = os.path.join(parent_dir, "data")
 CSV_PATH = os.path.join(DATA_DIR, "graves_history.csv")
 LOG_PATH = os.path.join(DATA_DIR, "prediction_log.csv")
+PREDICTION_LOG_COLUMNS = [
+    "timestamp", "commodity", "predicted_direction", "nymex_move_cents",
+    "lag_used", "window_used", "threshold_used", "actual_next_day_move_cents",
+    "prediction_source", "signal_contract", "baseline_contract",
+    "settlement_source", "baseline_source", "settlement_captured_at",
+    "contract_provenance_status",
+]
 
 def main():
     parser = argparse.ArgumentParser(description="Prediction Log Completeness & Safe Backfiller")
@@ -35,16 +42,15 @@ def main():
     if os.path.exists(LOG_PATH):
         df_log = pd.read_csv(LOG_PATH)
     else:
-        df_log = pd.DataFrame(columns=[
-            "timestamp", "commodity", "predicted_direction", "nymex_move_cents",
-            "lag_used", "window_used", "threshold_used", "actual_next_day_move_cents",
-            "prediction_source"
-        ])
+        df_log = pd.DataFrame(columns=PREDICTION_LOG_COLUMNS)
         
     # Standardize/ensure prediction_source exists
     if 'prediction_source' not in df_log.columns:
         df_log['prediction_source'] = 'unlabelled'
     df_log['prediction_source'] = df_log['prediction_source'].fillna('unlabelled')
+    for col in PREDICTION_LOG_COLUMNS:
+        if col not in df_log.columns:
+            df_log[col] = "unknown" if col.endswith("contract") or col.endswith("source") or col.endswith("status") else ""
     
     # Parse existing log dates for matching
     df_log['date_only'] = df_log['timestamp'].apply(lambda x: x.split('T')[0] if isinstance(x, str) else "")
@@ -172,7 +178,13 @@ def main():
             "window_used": window,
             "threshold_used": round(thresh, 2),
             "actual_next_day_move_cents": actual_move,
-            "prediction_source": "backfill"
+            "prediction_source": "backfill",
+            "signal_contract": "unknown",
+            "baseline_contract": "unknown",
+            "settlement_source": "historical_import",
+            "baseline_source": "graves_history",
+            "settlement_captured_at": "",
+            "contract_provenance_status": "unknown",
         }
         
         backfill_records.append(new_record)
@@ -191,17 +203,17 @@ def main():
         
         # Append new records
         df_to_append = pd.DataFrame(backfill_records)
-        df_to_append = df_to_append[
-            ["timestamp", "commodity", "predicted_direction", "nymex_move_cents",
-             "lag_used", "window_used", "threshold_used", "actual_next_day_move_cents",
-             "prediction_source"]
-        ]
+        df_to_append = df_to_append[PREDICTION_LOG_COLUMNS]
         
         if not existing_log_df.empty:
             # Ensure existing log has prediction_source
             if 'prediction_source' not in existing_log_df.columns:
                 existing_log_df['prediction_source'] = 'unlabelled'
             existing_log_df['prediction_source'] = existing_log_df['prediction_source'].fillna('unlabelled')
+            for col in PREDICTION_LOG_COLUMNS:
+                if col not in existing_log_df.columns:
+                    existing_log_df[col] = "unknown" if col.endswith("contract") or col.endswith("source") or col.endswith("status") else ""
+            existing_log_df = existing_log_df[PREDICTION_LOG_COLUMNS]
             
             final_df = pd.concat([existing_log_df, df_to_append], ignore_index=True)
         else:

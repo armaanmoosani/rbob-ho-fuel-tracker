@@ -26,6 +26,14 @@ TZ = pytz.timezone('America/Chicago')
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 CSV_PATH = os.path.join(DATA_DIR, "graves_history.csv")
 DS_PATH = os.path.join(DATA_DIR, "daily_settlement.json")
+SETTLEMENT_PROVENANCE_COLUMNS = [
+    "session_date", "commodity", "settlement_price", "schwab_symbol",
+    "yfinance_symbol", "source", "captured_at", "provenance_status",
+]
+
+
+def settlement_provenance_path():
+    return os.path.join(os.path.dirname(CSV_PATH), "nymex_settlement_provenance.csv")
 
 def mask_recipient(address):
     if not address:
@@ -113,7 +121,10 @@ def git_pull_rebase():
         sys.exit(1)
 
 def git_commit_push(message):
-    subprocess.run(["git", "add", "data/graves_history.csv", "data/integrity_hashes.csv"], check=True)
+    subprocess.run([
+        "git", "add", "data/graves_history.csv", "data/nymex_settlement_provenance.csv",
+        "data/integrity_hashes.csv"
+    ], check=True)
     subprocess.run(["git", "commit", "-m", message], check=True)
     subprocess.run(["git", "push"], check=True)
     print("Git commit and push successful.")
@@ -300,6 +311,52 @@ def read_daily_settlement(target_date_str):
         return ds
     return None
 
+
+def append_settlement_provenance(ds, target_date_str):
+    """Persist the contract identity for each settlement archived in graves_history."""
+    source = ds.get("source", "daily_settlement")
+    captured_at = ds.get("captured_at", "")
+    rows = []
+    for commodity, price_key, contract_key, yf_key, source_key in (
+        ("RB", "rbob_settlement", "rbob_contract", "rbob_yfinance_symbol", "rbob_source"),
+        ("HO", "heating_oil_settlement", "heating_oil_contract", "heating_oil_yfinance_symbol", "heating_oil_source"),
+    ):
+        price = ds.get(price_key, "")
+        if price in (None, ""):
+            continue
+        contract = ds.get(contract_key, "") or ""
+        rows.append({
+            "session_date": target_date_str,
+            "commodity": commodity,
+            "settlement_price": f"{float(price):.4f}",
+            "schwab_symbol": contract,
+            "yfinance_symbol": ds.get(yf_key, "") or "",
+            "source": ds.get(source_key, source),
+            "captured_at": captured_at,
+            "provenance_status": "verified" if contract else "unknown",
+        })
+
+    if not rows:
+        return
+    provenance_path = settlement_provenance_path()
+    existing = set()
+    if os.path.exists(provenance_path):
+        with open(provenance_path, newline="") as f:
+            existing = {
+                (row.get("session_date"), row.get("commodity"))
+                for row in csv.DictReader(f)
+            }
+    write_header = not os.path.exists(provenance_path)
+    with open(provenance_path, "a", newline="") as f:
+        writer = csv.DictWriter(
+            f, fieldnames=SETTLEMENT_PROVENANCE_COLUMNS, lineterminator="\n"
+        )
+        if write_header:
+            writer.writeheader()
+        for row in rows:
+            if (row["session_date"], row["commodity"]) not in existing:
+                writer.writerow(row)
+
 def get_github_settlement_snapshots(target_date_str):
     gh_pat = os.environ.get('GH_PAT')
     gh_repo = os.environ.get('GH_REPO')
@@ -359,50 +416,35 @@ def get_github_settlement_snapshots(target_date_str):
         ho_res = requests.get(ho_url, headers=headers, timeout=10)
         
         rb_val, ho_val = None, None
-
-        def _expected_front_month(prefix, date_str):
-            """Return the expected front-month Schwab symbol for the given session date."""
-            try:
-                from futures_util import get_front_month_contract, DELIVERY_MONTH_CODES
-                from datetime import date as _d
-                d = _d.fromisoformat(date_str)
-                yr, mo, _ = get_front_month_contract(d, prefix)
-                return f"/{prefix}{DELIVERY_MONTH_CODES[mo]}{yr % 100:02d}"
-            except Exception:
-                return None
+        rb_snap, ho_snap = {}, {}
 
         if rb_res.status_code == 200:
             rb_snap = json.loads(rb_res.json().get("value", "{}"))
             if rb_snap.get("date") == target_date_str:
-                snap_sym = rb_snap.get("schwab_symbol", "")
-                expected_sym = _expected_front_month("RB", target_date_str)
-                if expected_sym and snap_sym and snap_sym != expected_sym:
-                    print(f"[RB] GitHub variable snapshot was written for {snap_sym} but expected "
-                          f"{expected_sym}. Rejecting stale contract snapshot — will fall back to yfinance.")
-                else:
-                    rb_val = float(rb_snap["price"])
-                    if snap_sym:
-                        print(f"[RB] GitHub variables success: {snap_sym} price={rb_val}")
+                rb_val = float(rb_snap["price"])
+                if rb_snap.get("schwab_symbol"):
+                    print(f"[RB] GitHub variables success: {rb_snap['schwab_symbol']} price={rb_val}")
 
         if ho_res.status_code == 200:
             ho_snap = json.loads(ho_res.json().get("value", "{}"))
             if ho_snap.get("date") == target_date_str:
-                snap_sym = ho_snap.get("schwab_symbol", "")
-                expected_sym = _expected_front_month("HO", target_date_str)
-                if expected_sym and snap_sym and snap_sym != expected_sym:
-                    print(f"[HO] GitHub variable snapshot was written for {snap_sym} but expected "
-                          f"{expected_sym}. Rejecting stale contract snapshot — will fall back to yfinance.")
-                else:
-                    ho_val = float(ho_snap["price"])
-                    if snap_sym:
-                        print(f"[HO] GitHub variables success: {snap_sym} price={ho_val}")
+                ho_val = float(ho_snap["price"])
+                if ho_snap.get("schwab_symbol"):
+                    print(f"[HO] GitHub variables success: {ho_snap['schwab_symbol']} price={ho_val}")
 
         if rb_val is not None and ho_val is not None:
             return {
                 "date": target_date_str,
                 "rbob_settlement": rb_val,
                 "heating_oil_settlement": ho_val,
-                "source": "github_variables"
+                "source": "github_variables",
+                "captured_at": rb_snap.get("captured_at") or ho_snap.get("captured_at", ""),
+                "rbob_contract": rb_snap.get("schwab_symbol", ""),
+                "heating_oil_contract": ho_snap.get("schwab_symbol", ""),
+                "rbob_yfinance_symbol": rb_snap.get("yfinance_symbol", ""),
+                "heating_oil_yfinance_symbol": ho_snap.get("yfinance_symbol", ""),
+                "rbob_source": rb_snap.get("source", "github_variables"),
+                "heating_oil_source": ho_snap.get("source", "github_variables"),
             }
         else:
             print("GitHub variables for settlement snapshots were missing, stale, or incomplete.")
@@ -768,6 +810,8 @@ def main():
                 f"{prices[1]:.4f}",
                 f"{prices[2]:.4f}"
             ])
+
+        append_settlement_provenance(ds, date_str)
             
         try:
             validate_data.validate_all(DATA_DIR)

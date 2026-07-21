@@ -3,6 +3,7 @@ import sys
 import pandas as pd
 import hashlib
 import json
+import re
 from datetime import date, timedelta
 
 def get_good_friday(year):
@@ -243,7 +244,11 @@ def validate_prediction_log(log_path):
         print(f"Data validation failed: Failed to read prediction log CSV. Error: {e}")
         sys.exit(1)
 
-    required_cols = ["timestamp", "commodity", "predicted_direction", "actual_next_day_move_cents", "prediction_source"]
+    required_cols = [
+        "timestamp", "commodity", "predicted_direction", "actual_next_day_move_cents",
+        "prediction_source", "signal_contract", "baseline_contract", "settlement_source",
+        "baseline_source", "settlement_captured_at", "contract_provenance_status",
+    ]
     for col in required_cols:
         if col not in df.columns:
             print(f"Data validation failed: Missing column '{col}' in prediction log CSV.")
@@ -267,6 +272,12 @@ def validate_prediction_log(log_path):
         print(f"Data validation failed: Invalid prediction source(s) found in prediction log: {invalid}")
         sys.exit(1)
 
+    valid_provenance = {"verified", "unknown", "mismatch_suppressed", "unavailable"}
+    if not df['contract_provenance_status'].isin(valid_provenance).all():
+        invalid = df[~df['contract_provenance_status'].isin(valid_provenance)]['contract_provenance_status'].unique()
+        print(f"Data validation failed: Invalid contract provenance status(es) in prediction log: {invalid}")
+        sys.exit(1)
+
     for idx, val in enumerate(df['actual_next_day_move_cents']):
         if val == 'PENDING':
             continue
@@ -278,9 +289,55 @@ def validate_prediction_log(log_path):
 
     print("Prediction log validation: PASSED")
 
+
+def validate_settlement_provenance(provenance_path):
+    if not os.path.exists(provenance_path):
+        return
+    try:
+        df = pd.read_csv(provenance_path, dtype=str).fillna("")
+    except Exception as e:
+        print(f"Data validation failed: Failed to read settlement provenance CSV. Error: {e}")
+        sys.exit(1)
+
+    required_cols = [
+        "session_date", "commodity", "settlement_price", "schwab_symbol",
+        "yfinance_symbol", "source", "captured_at", "provenance_status",
+    ]
+    missing = [col for col in required_cols if col not in df.columns]
+    if missing:
+        print(f"Data validation failed: Settlement provenance missing column(s): {missing}")
+        sys.exit(1)
+    if df.duplicated(["session_date", "commodity"]).any():
+        print("Data validation failed: Duplicate settlement provenance session/commodity rows.")
+        sys.exit(1)
+    if not df["commodity"].isin({"RB", "HO"}).all():
+        print("Data validation failed: Settlement provenance has an invalid commodity.")
+        sys.exit(1)
+    if not df["provenance_status"].isin({"verified", "unknown"}).all():
+        print("Data validation failed: Settlement provenance has an invalid status.")
+        sys.exit(1)
+    try:
+        prices = pd.to_numeric(df["settlement_price"])
+        if (prices <= 0).any():
+            raise ValueError("non-positive settlement price")
+    except Exception as e:
+        print(f"Data validation failed: Settlement provenance has invalid prices: {e}")
+        sys.exit(1)
+    verified = df[df["provenance_status"] == "verified"]
+    for _, row in verified.iterrows():
+        if not re.match(r"^/(RB|HO)[FGHJKMNQUVXZ][0-9]{2}$", row["schwab_symbol"]):
+            print("Data validation failed: Verified settlement provenance has an invalid Schwab symbol.")
+            sys.exit(1)
+        if not row["schwab_symbol"].startswith(f"/{row['commodity']}"):
+            print("Data validation failed: Settlement provenance symbol does not match commodity.")
+            sys.exit(1)
+    print("Settlement provenance validation: PASSED")
+
 def validate_and_update_hashes(data_dir):
     hash_csv_path = os.path.join(data_dir, "integrity_hashes.csv")
     files_to_track = ["graves_history.csv", "config.json", "metrics_cache.json", "prediction_log.csv"]
+    if os.path.exists(os.path.join(data_dir, "nymex_settlement_provenance.csv")):
+        files_to_track.append("nymex_settlement_provenance.csv")
     
     existing_records = []
     if os.path.exists(hash_csv_path):
@@ -414,9 +471,11 @@ def validate_all(data_dir=None):
         data_dir = os.path.join(os.path.dirname(__file__), "data")
     csv_path = os.path.join(data_dir, "graves_history.csv")
     log_path = os.path.join(data_dir, "prediction_log.csv")
+    provenance_path = os.path.join(data_dir, "nymex_settlement_provenance.csv")
     
     validate_graves_history(csv_path)
     validate_prediction_log(log_path)
+    validate_settlement_provenance(provenance_path)
     validate_and_update_hashes(data_dir)
 
 if __name__ == "__main__":

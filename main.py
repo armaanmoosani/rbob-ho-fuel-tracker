@@ -137,6 +137,13 @@ TRUCK_GALLONS = 8500   # Standard truck load for dollar-value risk calculations
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 METRICS_CACHE_PATH = os.path.join(DATA_DIR, "metrics_cache.json")
+PREDICTION_LOG_COLUMNS = [
+    "timestamp", "commodity", "predicted_direction", "nymex_move_cents",
+    "lag_used", "window_used", "threshold_used", "actual_next_day_move_cents",
+    "prediction_source", "signal_contract", "baseline_contract",
+    "settlement_source", "baseline_source", "settlement_captured_at",
+    "contract_provenance_status",
+]
 DEFAULT_APP_CONFIG = {
     "MIN_ROWS_FOR_TUNING": 30,
     "BLEND_ALPHA": 0.3,
@@ -328,22 +335,99 @@ def save_alert_state(state):
 def settlement_snapshot_key(prefix):
     return f"SETTLE_SNAPSHOT_{prefix}"
 
-def load_settlement_snapshot(prefix, data, session_str):
+
+def load_settlement_snapshot_record(prefix, session_str):
     raw = get_repo_variable(settlement_snapshot_key(prefix))
     if not raw:
         return None
     try:
         snapshot = json.loads(raw)
-    except Exception:
+        if snapshot.get("date") != session_str:
+            return None
+        snapshot["price"] = float(snapshot["price"])
+        return snapshot
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError):
         return None
-    if snapshot.get("date") != session_str:
+
+
+def load_settlement_snapshot(prefix, data, session_str):
+    snapshot = load_settlement_snapshot_record(prefix, session_str)
+    if snapshot is None:
         return None
     if snapshot.get("schwab_symbol") != data.get("schwab_symbol"):
         return None
-    try:
-        return float(snapshot["price"])
-    except (KeyError, TypeError, ValueError):
-        return None
+    return snapshot["price"]
+
+
+def append_prediction_log(prefix, now, direction, change_cents, threshold, provenance):
+    log_path = os.path.join(DATA_DIR, "prediction_log.csv")
+    file_exists = os.path.exists(log_path)
+    local_now = now.astimezone(TZ)
+    session_str = local_now.date().isoformat()
+    if file_exists:
+        with open(log_path, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames != PREDICTION_LOG_COLUMNS:
+                raise RuntimeError("prediction_log.csv schema is outdated; run the contract provenance migration before live logging")
+            for row in reader:
+                if row.get("timestamp", "").startswith(session_str) and row.get("commodity") == prefix:
+                    return False
+
+    row = {
+        "timestamp": local_now.isoformat(),
+        "commodity": prefix,
+        "predicted_direction": direction,
+        "nymex_move_cents": f"{change_cents:.2f}",
+        "lag_used": APP_CONFIG.get("LAG_DAYS", 0),
+        "window_used": APP_CONFIG.get("ROLLING_WINDOW_DAYS", 120),
+        "threshold_used": f"{threshold:.2f}",
+        "actual_next_day_move_cents": "PENDING",
+        "prediction_source": "live",
+        "signal_contract": provenance.get("signal_contract", "unknown"),
+        "baseline_contract": provenance.get("baseline_contract", "unknown"),
+        "settlement_source": provenance.get("settlement_source", "unknown"),
+        "baseline_source": provenance.get("baseline_source", "unknown"),
+        "settlement_captured_at": provenance.get("settlement_captured_at", ""),
+        "contract_provenance_status": provenance.get("status", "unknown"),
+    }
+    with open(log_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=PREDICTION_LOG_COLUMNS, lineterminator="\n")
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+    return True
+
+
+def contract_provenance_for_signal(data, snapshot_record, used_snapshot):
+    """Describe whether a live verdict compares two prices from one contract."""
+    active_contract = data.get("schwab_symbol") or "unknown"
+    baseline_contract = data.get("baseline_schwab_symbol") or "unknown"
+    snapshot_contract = (snapshot_record or {}).get("schwab_symbol") or active_contract
+
+    if active_contract == "unknown" or baseline_contract == "unknown":
+        status = "unavailable"
+    elif baseline_contract != active_contract:
+        status = "mismatch_suppressed"
+    elif used_snapshot and snapshot_contract != active_contract:
+        status = "mismatch_suppressed"
+    else:
+        status = "verified"
+
+    if used_snapshot:
+        settlement_source = (snapshot_record or {}).get("source", "settlement_snapshot")
+        captured_at = (snapshot_record or {}).get("captured_at", "")
+    else:
+        settlement_source = f"live_proxy:{data.get('data_source', 'unknown')}"
+        captured_at = ""
+
+    return {
+        "signal_contract": snapshot_contract,
+        "baseline_contract": baseline_contract,
+        "settlement_source": settlement_source,
+        "baseline_source": data.get("baseline_source", "unknown"),
+        "settlement_captured_at": captured_at,
+        "status": status,
+    }
 
 def save_settlement_snapshots(all_data, now):
     if not (now.hour == 13 and 30 <= now.minute <= 45):
@@ -361,7 +445,9 @@ def save_settlement_snapshots(all_data, now):
             "date": session_str,
             "price": round(data['current_price'], 4),
             "captured_at": now.isoformat(),
-            "schwab_symbol": data.get("schwab_symbol")
+            "schwab_symbol": data.get("schwab_symbol"),
+            "yfinance_symbol": data.get("yfinance_symbol"),
+            "source": data.get("data_source", "unknown"),
         }
         try:
             set_repo_variable(settlement_snapshot_key(prefix), json.dumps(snapshot, sort_keys=True))
@@ -370,7 +456,7 @@ def save_settlement_snapshots(all_data, now):
             print(f"[{prefix}] Warning: could not save settlement snapshot: {e}")
 
     # NEW LOGIC: Save daily_settlement.json locally for ingestion
-    ds_path = os.path.join(os.path.dirname(__file__), "data", "daily_settlement.json")
+    ds_path = os.path.join(DATA_DIR, "daily_settlement.json")
     try:
         if os.path.exists(ds_path):
             with open(ds_path, "r") as f:
@@ -384,8 +470,14 @@ def save_settlement_snapshots(all_data, now):
         }
         if 'RB' in all_data:
             ds["rbob_settlement"] = round(all_data['RB']['current_price'], 4)
+            ds["rbob_contract"] = all_data['RB'].get("schwab_symbol")
+            ds["rbob_yfinance_symbol"] = all_data['RB'].get("yfinance_symbol")
+            ds["rbob_source"] = all_data['RB'].get("data_source", "unknown")
         if 'HO' in all_data:
             ds["heating_oil_settlement"] = round(all_data['HO']['current_price'], 4)
+            ds["heating_oil_contract"] = all_data['HO'].get("schwab_symbol")
+            ds["heating_oil_yfinance_symbol"] = all_data['HO'].get("yfinance_symbol")
+            ds["heating_oil_source"] = all_data['HO'].get("data_source", "unknown")
             
         os.makedirs(os.path.dirname(ds_path), exist_ok=True)
         with open(ds_path, "w") as f:
@@ -460,12 +552,49 @@ def build_rack_signal(prefix, data, now):
         }
 
     session_str = get_session_date_str(now)
-    snapshot_price = load_settlement_snapshot(prefix, data, session_str)
+    snapshot_record = data.get("settlement_snapshot")
+    if snapshot_record is not None:
+        try:
+            snapshot_price = float(snapshot_record["price"])
+        except (KeyError, TypeError, ValueError):
+            snapshot_record = None
+            snapshot_price = None
+    else:
+        # Retain the scalar compatibility path for legacy callers and tests. Live
+        # verdicts populate settlement_snapshot in attach_rack_signals below.
+        snapshot_price = load_settlement_snapshot(prefix, data, session_str)
     signal_price = snapshot_price if snapshot_price is not None else data['current_price']
     basis = "1:30 PM CT settlement-window snapshot" if snapshot_price is not None else "live price proxy"
     change_cents = (signal_price - yest) * 100
     name = COMMODITIES[prefix]['name']
     hike_thresh = APP_CONFIG.get(f"{prefix}_HIKE_THRESHOLD_CENTS", 1.0)
+    provenance = contract_provenance_for_signal(data, snapshot_record, snapshot_price is not None)
+
+    if data.get("contract_provenance_required") and provenance["status"] != "verified":
+        issue = "does not match" if provenance["status"] == "mismatch_suppressed" else "is unavailable"
+        risk_text = (
+            f"Signal suppressed: the {provenance['settlement_source']} settlement contract "
+            f"({provenance['signal_contract']}) {issue} for comparison with the prior "
+            f"settlement contract ({provenance['baseline_contract']})."
+        )
+        try:
+            append_prediction_log(prefix, now, "FLAT", 0.0, 0.0, provenance)
+        except Exception as e:
+            print(f"Failed to write prediction log: {e}")
+        return {
+            "action": "NO_EDGE",
+            "label": "Contract provenance unavailable",
+            "color": "#64748b",
+            "text": f"{name}: NO EDGE. Contract match could not be verified; alert suppressed.",
+            "change_cents": None,
+            "basis": basis,
+            "signal_price": signal_price,
+            "threshold_cents": hike_thresh,
+            "z_score": 0.0,
+            "conviction": "Low Conviction",
+            "risk_text": risk_text,
+            "contract_provenance": provenance,
+        }
 
     # Check for contract roll day override
     # During test runs (pytest) we avoid suppressing alerts to keep tests deterministic,
@@ -516,22 +645,7 @@ def build_rack_signal(prefix, data, now):
             risk_text += " WARNING: Corrupt config.json detected! System has rolled back to defaults."
             
         try:
-            log_path = os.path.join(DATA_DIR, "prediction_log.csv")
-            file_exists = os.path.exists(log_path)
-            local_now = now.astimezone(TZ)
-            session_str = local_now.date().isoformat()
-            already_logged = False
-            if file_exists:
-                with open(log_path, "r") as f:
-                    for line in f:
-                        if line.startswith(session_str) and f",{prefix}," in line:
-                            already_logged = True
-                            break
-            if not already_logged:
-                with open(log_path, "a") as f:
-                    if not file_exists:
-                        f.write("timestamp,commodity,predicted_direction,nymex_move_cents,lag_used,window_used,threshold_used,actual_next_day_move_cents,prediction_source\n")
-                    f.write(f"{local_now.isoformat()},{prefix},FLAT,0.00,0,120,0.00,PENDING,live\n")
+            append_prediction_log(prefix, now, "FLAT", 0.0, 0.0, provenance)
         except Exception as e:
             print(f"Failed to write prediction log: {e}")
 
@@ -546,7 +660,8 @@ def build_rack_signal(prefix, data, now):
             "threshold_cents": hike_thresh,
             "z_score": 0.0,
             "conviction": "Low Conviction",
-            "risk_text": risk_text
+            "risk_text": risk_text,
+            "contract_provenance": provenance,
         }
 
 
@@ -651,33 +766,10 @@ def build_rack_signal(prefix, data, now):
             risk_text = "WARNING: Corrupt config.json detected! System has rolled back to defaults."
 
     # Immutable Prediction Audit Log (Idempotent)
-
     try:
-        log_path = os.path.join(DATA_DIR, "prediction_log.csv")
-        file_exists = os.path.exists(log_path)
-        
-        local_now = now.astimezone(TZ)
-        session_str = local_now.date().isoformat()
-        already_logged = False
-        
-        if file_exists:
-            with open(log_path, "r") as f:
-                for line in f:
-                    if line.startswith(session_str) and f",{prefix}," in line:
-                        already_logged = True
-                        break
-                        
-        if not already_logged:
-            with open(log_path, "a") as f:
-                if not file_exists:
-                    f.write("timestamp,commodity,predicted_direction,nymex_move_cents,lag_used,window_used,threshold_used,actual_next_day_move_cents,prediction_source\n")
-                
-                direction = "HIKE" if "BUY" in action else "DROP" if "WAIT" in action else "FLAT"
-                thresh = hike_thresh if "BUY" in action else drop_thresh if "WAIT" in action else 0.0
-                lag = APP_CONFIG.get("LAG_DAYS", 0)
-                window = APP_CONFIG.get("ROLLING_WINDOW_DAYS", 120)
-                
-                f.write(f"{local_now.isoformat()},{prefix},{direction},{change_cents:.2f},{lag},{window},{thresh:.2f},PENDING,live\n")
+        direction = "HIKE" if "BUY" in action else "DROP" if "WAIT" in action else "FLAT"
+        thresh = hike_thresh if "BUY" in action else drop_thresh if "WAIT" in action else 0.0
+        append_prediction_log(prefix, now, direction, change_cents, thresh, provenance)
     except Exception as e:
         print(f"Failed to write prediction log: {e}")
 
@@ -692,12 +784,17 @@ def build_rack_signal(prefix, data, now):
         "threshold_cents": hike_thresh,
         "z_score": z_score,
         "conviction": conviction,
-        "risk_text": risk_text
+        "risk_text": risk_text,
+        "contract_provenance": provenance,
     }
 
 def attach_rack_signals(all_data, now):
+    session_str = get_session_date_str(now)
     for prefix in ['RB', 'HO']:
         if prefix in all_data:
+            snapshot = load_settlement_snapshot_record(prefix, session_str)
+            if snapshot is not None:
+                all_data[prefix]['settlement_snapshot'] = snapshot
             all_data[prefix]['rack_signal'] = build_rack_signal(prefix, all_data[prefix], now)
 
 def append_price(history, ts, price):
@@ -1750,7 +1847,10 @@ def fetch_commodity(prefix, cfg, now, access_token, alert_state=None):
     print(f"[{prefix}] Targeting front-month: Schwab {schwab_symbol} | yf {dynamic_yf_symbol}")
     
     current_price = open_price = high_price = low_price = None
+    schwab_close = 0.0
     data_source = None
+    baseline_source = "unknown"
+    baseline_schwab_symbol = None
 
     def quote_float(quote, *keys):
         for key in keys:
@@ -1906,6 +2006,8 @@ def fetch_commodity(prefix, cfg, now, access_token, alert_state=None):
     # settlements, creating a cross-contract comparison that produces false % swings.
     if data_source == 'schwab' and schwab_close > 0:
         yesterday_close = schwab_close
+        baseline_source = "schwab_close_price"
+        baseline_schwab_symbol = schwab_symbol
         if csv_yesterday_close and abs(csv_yesterday_close - schwab_close) > 0.05:
             print(f"[{prefix}] Using Schwab contract-specific closePrice ({schwab_close:.4f}) "
                   f"as yesterday_close. CSV had {csv_yesterday_close:.4f} "
@@ -1914,6 +2016,7 @@ def fetch_commodity(prefix, cfg, now, access_token, alert_state=None):
             print(f"[{prefix}] Using Schwab contract-specific closePrice ({schwab_close:.4f}) as yesterday_close.")
     elif csv_yesterday_close is not None:
         yesterday_close = csv_yesterday_close
+        baseline_source = "graves_history_unverified"
         print(f"[{prefix}] Using CSV yesterday_close ({yesterday_close:.4f}) — Schwab close not available.")
         
     try:
@@ -1935,8 +2038,20 @@ def fetch_commodity(prefix, cfg, now, access_token, alert_state=None):
                 target_prev_day = previous_nymex_business_day(session_date)
                 if last_daily_date < target_prev_day:
                     print(f"[{prefix}] Warning: yfinance daily close history is stale (last available: {last_daily_date}, expected: {target_prev_day}). Bypassing yfinance close price.")
+                elif data_source == 'yfinance' and dynamic_yf_symbol == schwab_to_yfinance_symbol(schwab_symbol):
+                    # A dated Yahoo symbol is still less authoritative than Schwab,
+                    # but it identifies the same contract and is safer than the
+                    # contract-unknown historical CSV after a roll.
+                    yesterday_close = float(prev_daily['Close'].iloc[-1])
+                    baseline_source = "yfinance_contract_daily"
+                    baseline_schwab_symbol = schwab_symbol
                 elif yesterday_close is None:
                     yesterday_close = float(prev_daily['Close'].iloc[-1])
+                    if dynamic_yf_symbol == schwab_to_yfinance_symbol(schwab_symbol):
+                        baseline_source = "yfinance_contract_daily"
+                        baseline_schwab_symbol = schwab_symbol
+                    else:
+                        baseline_source = "yfinance_continuous_unverified"
                 
                 # Calculate moving averages using strictly closed daily data (prev_daily) up to T-1
                 thirty_day_avg = float(prev_daily['Close'].mean())
@@ -1980,7 +2095,11 @@ def fetch_commodity(prefix, cfg, now, access_token, alert_state=None):
         'chart_5d_b64': chart_5d,
         'schwab_symbol': schwab_symbol,
         'yfinance_symbol': dynamic_yf_symbol,
-        'quote_time': quote_time
+        'quote_time': quote_time,
+        'data_source': data_source,
+        'baseline_source': baseline_source,
+        'baseline_schwab_symbol': baseline_schwab_symbol,
+        'contract_provenance_required': prefix in ('RB', 'HO'),
     }
 
 

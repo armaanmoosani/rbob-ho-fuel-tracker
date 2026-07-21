@@ -106,7 +106,13 @@ class TestValidateData(unittest.TestCase):
             "commodity": ["RB", "HO"],
             "predicted_direction": ["HIKE", "DROP"],
             "actual_next_day_move_cents": ["PENDING", "1.5"],
-            "prediction_source": ["live", "backfill"]
+            "prediction_source": ["live", "backfill"],
+            "signal_contract": ["/RBM26", "unknown"],
+            "baseline_contract": ["/RBM26", "unknown"],
+            "settlement_source": ["schwab", "historical_import"],
+            "baseline_source": ["schwab_close_price", "graves_history"],
+            "settlement_captured_at": ["2026-05-20T13:35:00-05:00", ""],
+            "contract_provenance_status": ["verified", "unknown"],
         })
         df.to_csv(self.log_path, index=False)
         # Should not raise exception

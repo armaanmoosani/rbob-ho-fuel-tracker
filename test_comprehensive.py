@@ -1429,6 +1429,9 @@ class TestCategory12ProductionFailureProtection(unittest.TestCase):
 
         self.assertEqual(res['schwab_symbol'], '/RBM26')
         self.assertEqual(res['current_price'], 2.20)
+        self.assertEqual(res['baseline_schwab_symbol'], '/RBM26')
+        self.assertEqual(res['baseline_source'], 'schwab_close_price')
+        self.assertTrue(res['contract_provenance_required'])
         mock_resolve.assert_called_once_with('RB', datetime(2026, 5, 22, 12, 0, tzinfo=pytz.utc), 'token')
 
     @patch('main.save_price_history')
@@ -1662,7 +1665,7 @@ class TestCategory13LiveValidationAndRobustness(unittest.TestCase):
                             # Write a minimal valid prediction_log.csv so validate_all passes
                             log_path = os.path.join(self.temp_dir, "prediction_log.csv")
                             with open(log_path, "w") as f:
-                                f.write("timestamp,commodity,predicted_direction,nymex_move_cents,lag_used,window_used,threshold_used,actual_next_day_move_cents,prediction_source\n")
+                                f.write("timestamp,commodity,predicted_direction,nymex_move_cents,lag_used,window_used,threshold_used,actual_next_day_move_cents,prediction_source,signal_contract,baseline_contract,settlement_source,baseline_source,settlement_captured_at,contract_provenance_status\n")
                             # Write a minimal config.json so validate_all does not error on JSON check
                             config_path = os.path.join(self.temp_dir, "config.json")
                             with open(config_path, "w") as f:
@@ -1698,7 +1701,7 @@ class TestCategory13LiveValidationAndRobustness(unittest.TestCase):
             
         # Empty prediction log initially
         with open(self.log_path, "w") as f:
-            f.write("timestamp,commodity,predicted_direction,nymex_move_cents,lag_used,window_used,threshold_used,actual_next_day_move_cents,prediction_source\n")
+            f.write("timestamp,commodity,predicted_direction,nymex_move_cents,lag_used,window_used,threshold_used,actual_next_day_move_cents,prediction_source,signal_contract,baseline_contract,settlement_source,baseline_source,settlement_captured_at,contract_provenance_status\n")
             
         old_csv = backfiller.CSV_PATH
         old_log = backfiller.LOG_PATH

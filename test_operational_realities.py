@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pandas as pd
 
 import weekly_report
+import ingest_prices
 
 
 class TestPredictionSourceReporting(unittest.TestCase):
@@ -95,6 +96,86 @@ class TestConfigurationOverlayConsistency(unittest.TestCase):
         self.assertEqual(main_cfg["RB_HIKE_THRESHOLD_CENTS"], 2.99)
         self.assertEqual(replay_cfg["RB_HIKE_THRESHOLD_CENTS"], 2.99)
         self.assertEqual(statistics_cfg["RB_HIKE_THRESHOLD_CENTS"], 2.99)
+
+
+class TestContractProvenance(unittest.TestCase):
+    def test_mismatched_snapshot_and_baseline_suppresses_live_signal_and_logs_identity(self):
+        import main
+
+        now = pd.Timestamp("2026-07-20T14:35:00", tz="America/Chicago").to_pydatetime()
+        data = {
+            "current_price": 2.20,
+            "yesterday_close": 2.00,
+            "schwab_symbol": "/RBN26",
+            "baseline_schwab_symbol": "/RBQ26",
+            "baseline_source": "schwab_close_price",
+            "data_source": "schwab",
+            "contract_provenance_required": True,
+            "settlement_snapshot": {
+                "price": 2.20,
+                "schwab_symbol": "/RBN26",
+                "source": "schwab",
+                "captured_at": "2026-07-20T13:35:00-05:00",
+            },
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, patch("main.DATA_DIR", temp_dir):
+            signal = main.build_rack_signal("RB", data, now)
+            log = pd.read_csv(os.path.join(temp_dir, "prediction_log.csv"))
+
+        self.assertEqual(signal["action"], "NO_EDGE")
+        self.assertEqual(signal["contract_provenance"]["status"], "mismatch_suppressed")
+        self.assertEqual(log.loc[0, "predicted_direction"], "FLAT")
+        self.assertEqual(log.loc[0, "signal_contract"], "/RBN26")
+        self.assertEqual(log.loc[0, "baseline_contract"], "/RBQ26")
+        self.assertEqual(log.loc[0, "contract_provenance_status"], "mismatch_suppressed")
+
+    def test_matching_contract_allows_signal_and_marks_provenance_verified(self):
+        import main
+
+        now = pd.Timestamp("2026-07-20T14:35:00", tz="America/Chicago").to_pydatetime()
+        data = {
+            "current_price": 2.20,
+            "yesterday_close": 2.00,
+            "schwab_symbol": "/RBN26",
+            "baseline_schwab_symbol": "/RBN26",
+            "baseline_source": "schwab_close_price",
+            "data_source": "schwab",
+            "contract_provenance_required": True,
+            "settlement_snapshot": {
+                "price": 2.20,
+                "schwab_symbol": "/RBN26",
+                "source": "schwab",
+                "captured_at": "2026-07-20T13:35:00-05:00",
+            },
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, patch("main.DATA_DIR", temp_dir), patch("main.is_contract_roll_day", return_value=False):
+            signal = main.build_rack_signal("RB", data, now)
+
+        self.assertNotEqual(signal["label"], "Contract provenance unavailable")
+        self.assertEqual(signal["contract_provenance"]["status"], "verified")
+
+    def test_settlement_ledger_preserves_contract_and_is_idempotent(self):
+        settlement = {
+            "rbob_settlement": 2.20,
+            "heating_oil_settlement": 2.30,
+            "rbob_contract": "/RBN26",
+            "heating_oil_contract": "/HON26",
+            "rbob_yfinance_symbol": "RBN26.NYM",
+            "heating_oil_yfinance_symbol": "HON26.NYM",
+            "rbob_source": "schwab",
+            "heating_oil_source": "schwab",
+            "captured_at": "2026-07-20T13:35:00-05:00",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "ingest_prices.CSV_PATH", os.path.join(temp_dir, "graves_history.csv")
+        ):
+            ingest_prices.append_settlement_provenance(settlement, "2026-07-20")
+            ingest_prices.append_settlement_provenance(settlement, "2026-07-20")
+            ledger = pd.read_csv(os.path.join(temp_dir, "nymex_settlement_provenance.csv"))
+
+        self.assertEqual(len(ledger), 2)
+        self.assertEqual(set(ledger["schwab_symbol"]), {"/RBN26", "/HON26"})
+        self.assertTrue((ledger["provenance_status"] == "verified").all())
 
 
 if __name__ == "__main__":
