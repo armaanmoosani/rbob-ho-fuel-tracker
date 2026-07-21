@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import date, datetime, time, timedelta
 import calendar
 
@@ -11,6 +12,58 @@ DELIVERY_MONTH_CODES = {
     1: 'F', 2: 'G', 3: 'H', 4: 'J', 5: 'K', 6: 'M',
     7: 'N', 8: 'Q', 9: 'U', 10: 'V', 11: 'X', 12: 'Z'
 }
+
+
+def extract_schwab_active_future_symbol(response_json, prefix):
+    """Return Schwab's declared active futures contract from quote metadata."""
+    if not isinstance(response_json, dict):
+        return None
+
+    expected = re.compile(rf"^/{re.escape(prefix)}[FGHJKMNQUVXZ]\d{{2}}$")
+
+    def normalize(value):
+        if not isinstance(value, str):
+            return None
+        symbol = value.strip().upper().split(":", 1)[0]
+        if not symbol.startswith("/"):
+            symbol = "/" + symbol
+        return symbol if expected.fullmatch(symbol) else None
+
+    root_symbol = f"/{prefix}"
+    root_entry = response_json.get(root_symbol)
+    if isinstance(root_entry, dict):
+        root_active = normalize((root_entry.get("reference") or {}).get("futureActiveSymbol"))
+        if root_active:
+            return root_active
+
+    # Response keys are not guaranteed to preserve the request's spelling or order.
+    declared = []
+    for entry in response_json.values():
+        if not isinstance(entry, dict):
+            continue
+        reference = entry.get("reference") or {}
+        active = normalize(reference.get("futureActiveSymbol"))
+        if active:
+            declared.append(active)
+    unique_declared = list(dict.fromkeys(declared))
+    if len(unique_declared) == 1:
+        return unique_declared[0]
+
+    # Some responses expose only futureIsActive on individual contract references.
+    active_contracts = []
+    for response_symbol, entry in response_json.items():
+        if not isinstance(entry, dict):
+            continue
+        reference = entry.get("reference") or {}
+        is_active = reference.get("futureIsActive")
+        if is_active is True or (isinstance(is_active, str) and is_active.lower() == "true"):
+            quote = entry.get("quote") or {}
+            symbol = normalize(quote.get("symbol") or entry.get("symbol") or response_symbol)
+            if symbol:
+                active_contracts.append(symbol)
+
+    unique_active = list(dict.fromkeys(active_contracts))
+    return unique_active[0] if len(unique_active) == 1 else None
 
 def add_month(year, month, offset):
     month += offset

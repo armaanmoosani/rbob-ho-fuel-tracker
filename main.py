@@ -218,7 +218,8 @@ from futures_util import (
     contract_last_trade_date,
     get_front_month_contract,
     is_contract_roll_day,
-    get_front_month_schwab_symbol
+    get_front_month_schwab_symbol,
+    extract_schwab_active_future_symbol,
 )
 
 def schwab_to_yfinance_symbol(schwab_symbol):
@@ -1697,27 +1698,7 @@ def is_holiday(dt):
     local_date = dt.astimezone(TZ).date()
     return local_date in us_market_holidays(local_date.year)
 
-def resolve_active_schwab_symbol(prefix, now, access_token, candidate_months=4):
-    def quote_float(quote, *keys):
-        for key in keys:
-            value = quote.get(key)
-            if value not in (None, ''):
-                try:
-                    value = float(value)
-                    if value > 0:
-                        return value
-                except (TypeError, ValueError):
-                    pass
-        return None
-
-    def quote_activity(quote):
-        # Use open interest as the primary metric — this matches ThinkorSwim's algorithm
-        # for rolling its continuous /RB, /HO, /CL symbols.  During the roll window the
-        # next month gains daily volume first, but the current month retains the majority
-        # of outstanding positions (open interest) until the true crossover.  Daily volume
-        # is used as a fallback only when OI is not reported (e.g. overnight sessions).
-        return quote_float(quote, 'openInterest', 'totalVolume', 'volume', 'volumeDay') or 0.0
-
+def schwab_contract_candidates(prefix, now, candidate_months=4):
     # Use the CME Globex session date (not raw calendar date) for contract resolution.
     # After 5 PM CT, the session has already rolled to the next calendar day, so
     # get_session_date_str correctly returns tomorrow's date for post-5PM runs.
@@ -1734,58 +1715,46 @@ def resolve_active_schwab_symbol(prefix, now, access_token, candidate_months=4):
     for i in range(candidate_months):
         cyear, cmonth = add_month(schedule_year, schedule_month, i)
         candidates.append(f"/{prefix}{DELIVERY_MONTH_CODES[cmonth]}{cyear % 100:02d}")
+    return candidates
+
+
+def get_schwab_declared_active_symbol(prefix, access_token, candidates):
+    """Query Schwab's continuous future metadata without inferring from liquidity."""
+    if not access_token:
+        return None
+    symbols = [f"/{prefix}", *candidates]
+    res = requests.get(
+        "https://api.schwabapi.com/marketdata/v1/quotes",
+        params={"symbols": ",".join(symbols)},
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=15,
+    )
+    res.raise_for_status()
+    return extract_schwab_active_future_symbol(res.json(), prefix)
+
+
+def resolve_active_schwab_symbol(prefix, now, access_token, candidate_months=4):
+    candidates = schwab_contract_candidates(prefix, now, candidate_months)
 
     # ── Resolution strategy ──────────────────────────────────────────────────
-    # 1. PRIMARY: Schwab live-quote volume  — same infrastructure as ThinkorSwim;
-    #    picks the candidate with the highest real-time activity so the resolved
-    #    contract always matches what ThinkorSwim shows as the front month.
+    # 1. PRIMARY: Schwab's futureActiveSymbol/futureIsActive reference metadata.
     # 2. FALLBACK: yfinance underlyingSymbol  — used when Schwab token is expired;
     #    Yahoo Finance rolls its continuous symbol on its own schedule which can
     #    differ from CME convention, so it is secondary to Schwab.
     # 3. LAST RESORT: candidates[0]  (first contract in our session-adjusted list).
 
-    # 1. Schwab live-quote volume (primary — matches ThinkorSwim)
+    # Open interest and volume deliberately do not participate in contract selection:
+    # a deferred month can be more liquid while Schwab's continuous root is still mapped
+    # to the prompt contract used for the rack-price comparison.
     if access_token:
         try:
-            symbols = ",".join(candidates)
-            res = requests.get(
-                "https://api.schwabapi.com/marketdata/v1/quotes",
-                params={"symbols": symbols},
-                headers={"Authorization": f"Bearer {access_token}"},
-                timeout=15
-            )
-            res.raise_for_status()
-            res_json = res.json()
-
-            best_symbol = None
-            best_volume = -1.0
-            best_idx = float('inf')
-            for idx, symbol in enumerate(candidates):
-                quote_entry = None
-                if symbol in res_json:
-                    quote_entry = res_json[symbol].get('quote', {})
-                elif isinstance(res_json, dict):
-                    quote_entry = next(
-                        (item.get('quote') for item in res_json.values() if isinstance(item, dict) and item.get('quote', {}).get('symbol') == symbol),
-                        None
-                    )
-                if not quote_entry:
-                    continue
-                vol = float(quote_activity(quote_entry))
-                # Pick highest volume; break ties by preferring the nearest contract (lowest idx)
-                if vol > best_volume or (vol == best_volume and idx < best_idx):
-                    best_volume = vol
-                    best_idx = idx
-                    best_symbol = symbol
-
-            if best_symbol:
-                # Accept any candidate that has non-zero activity, OR the nearest candidate
-                # when all are zero (thin overnight market — nearest = most liquid by convention).
-                print(f"[{prefix}] Resolved active Schwab symbol from live Schwab volume (primary): "
-                      f"{best_symbol} (volume: {best_volume:.0f})")
-                return best_symbol
+            active_symbol = get_schwab_declared_active_symbol(prefix, access_token, candidates)
+            if active_symbol:
+                print(f"[{prefix}] Resolved active symbol from Schwab reference metadata: {active_symbol}")
+                return active_symbol
+            print(f"[{prefix}] Schwab quote response did not declare an active contract. Falling back to yfinance.")
         except Exception as exc:
-            print(f"[{prefix}] Schwab volume resolution failed: {exc}. Falling back to yfinance.")
+            print(f"[{prefix}] Schwab active-contract resolution failed: {exc}. Falling back to yfinance.")
 
     # 2. yfinance underlyingSymbol (fallback — used when Schwab token is expired)
     try:
@@ -1800,7 +1769,7 @@ def resolve_active_schwab_symbol(prefix, now, access_token, candidate_months=4):
     except Exception as yf_err:
         print(f"[{prefix}] yfinance underlyingSymbol lookup failed: {yf_err}.")
 
-    print(f"[{prefix}] WARNING: Both Schwab volume and yfinance underlyingSymbol resolution failed. "
+    print(f"[{prefix}] WARNING: Both Schwab metadata and yfinance underlyingSymbol resolution failed. "
           f"Falling back to math-based candidates[0]: {candidates[0]}. This may be the wrong contract during rollover week!")
     return candidates[0]
 
@@ -1850,50 +1819,24 @@ def fetch_commodity(prefix, cfg, now, access_token, alert_state=None):
             except Exception as _e:
                 print(f"[{prefix}] Warning: symbol-continuity check failed in fetch_commodity: {_e}")
     if cached_symbol and not on_roll_day:
-        # Validate the cached symbol against live Schwab volume before trusting it.
-        # The cache may have been written by an older resolver (yfinance-primary) that
-        # picked the wrong contract.  If Schwab volume now clearly points to a different
-        # contract, discard the stale cache and re-resolve.
+        # Validate the cache against Schwab's declared active contract every run. This
+        # lets the tracker follow Schwab's continuous symbol immediately when it rolls.
+        # If Schwab metadata is temporarily unavailable, retain the last authoritative
+        # cache instead of switching contracts based on a liquidity heuristic.
         cache_is_valid = True
+        declared_active = None
         if access_token:
             try:
-                from datetime import date as _date_type
-                _session_date = _date_type.fromisoformat(session_str)
-                _cy, _cm, _ = get_front_month_contract(_session_date, prefix)
-                _candidates = []
-                for _i in range(4):
-                    _cyy, _cmm = add_month(_cy, _cm, _i)
-                    _candidates.append(f"/{prefix}{DELIVERY_MONTH_CODES[_cmm]}{_cyy % 100:02d}")
-                _res = requests.get(
-                    "https://api.schwabapi.com/marketdata/v1/quotes",
-                    params={"symbols": ",".join(_candidates)},
-                    headers={"Authorization": f"Bearer {access_token}"},
-                    timeout=10
-                )
-                _res.raise_for_status()
-                _rj = _res.json()
-                _best_sym, _best_vol, _cached_vol = None, -1.0, 0.0
-                for _idx, _sym in enumerate(_candidates):
-                    _qe = _rj.get(_sym, {}).get('quote') or next(
-                        (v.get('quote') for v in _rj.values() if isinstance(v, dict) and v.get('quote', {}).get('symbol') == _sym),
-                        None
-                    )
-                    if not _qe:
-                        continue
-                    _vol = float(next((float(_qe[k]) for k in ('openInterest','totalVolume','volume','volumeDay') if _qe.get(k) and float(_qe[k]) > 0), 0.0))
-                    if _sym == cached_symbol:
-                        _cached_vol = _vol
-                    if _vol > _best_vol:
-                        _best_vol = _vol
-                        _best_sym = _sym
-                # Invalidate cache if a different contract has strictly higher open interest
-                # AND the margin is not just overnight noise (cached_val == 0 is definitive)
-                if _best_sym and _best_sym != cached_symbol and _best_vol > _cached_vol:
-                    print(f"[{prefix}] Cache invalid: cached {cached_symbol} (OI={_cached_vol:.0f}) "
-                          f"but Schwab open interest says {_best_sym} (OI={_best_vol:.0f}) is the front month. Re-resolving.")
+                _candidates = schwab_contract_candidates(prefix, now)
+                declared_active = get_schwab_declared_active_symbol(prefix, access_token, _candidates)
+                if declared_active and declared_active != cached_symbol:
+                    print(f"[{prefix}] Schwab active contract changed from cached {cached_symbol} "
+                          f"to {declared_active}.")
                     cache_is_valid = False
+                elif declared_active:
+                    print(f"[{prefix}] Cache validated by Schwab active-contract metadata: {cached_symbol}")
                 else:
-                    print(f"[{prefix}] Cache validated by Schwab open interest: {cached_symbol} (OI={_cached_vol:.0f})")
+                    print(f"[{prefix}] Schwab did not declare an active contract; retaining cached {cached_symbol}.")
             except Exception as _ve:
                 print(f"[{prefix}] Cache validation skipped (Schwab unavailable): {_ve}")
 
@@ -1901,12 +1844,12 @@ def fetch_commodity(prefix, cfg, now, access_token, alert_state=None):
             schwab_symbol = cached_symbol
             print(f"[{prefix}] Using cached active symbol for session {session_str}: {schwab_symbol}")
         else:
-            schwab_symbol = resolve_active_schwab_symbol(prefix, now, access_token)
+            schwab_symbol = declared_active
             alert_state_updates[cache_key] = schwab_symbol
-            print(f"[{prefix}] Re-resolved active symbol for session {session_str}: {schwab_symbol}")
+            print(f"[{prefix}] Updated active symbol for session {session_str}: {schwab_symbol}")
     else:
         if on_roll_day:
-            print(f"[{prefix}] Session roll day — bypassing stale cache and re-resolving by live Schwab volume.")
+            print(f"[{prefix}] Session roll day — bypassing stale cache and re-resolving from live contract metadata.")
         schwab_symbol = resolve_active_schwab_symbol(prefix, now, access_token)
         alert_state_updates[cache_key] = schwab_symbol
         print(f"[{prefix}] Resolved active symbol for session {session_str}: {schwab_symbol}")

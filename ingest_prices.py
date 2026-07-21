@@ -484,19 +484,44 @@ def get_thinkorswim_settlement(target_date_str):
             token_json = token_res.json()
             access_token = token_json.get('access_token')
             if access_token:
-                # Resolve the front-month Schwab symbols using market-convention first
-                # (yfinance underlyingSymbol), then fall back to math-based LTD schedule.
-                # The math-based approach lags the real market roll by 3-5 weeks, causing
-                # wrong-contract settlement prices to be stored during the rollover window.
+                # Resolve the same active contracts used by Schwab's continuous roots so
+                # settlement ingestion and live signals cannot silently use different months.
                 try:
                     dt_target = _dt.fromisoformat(target_date_str)
                 except Exception:
                     dt_target = _dt.now()
 
                 def _resolve_ingest_symbol(prefix):
-                    """Resolve front-month contract symbol: yfinance first, math fallback."""
-                    from futures_util import get_front_month_schwab_symbol
+                    """Resolve front-month contract: Schwab metadata, Yahoo, then calendar."""
+                    from futures_util import (
+                        DELIVERY_MONTH_CODES,
+                        add_month,
+                        extract_schwab_active_future_symbol,
+                        get_front_month_contract,
+                        get_front_month_schwab_symbol,
+                    )
                     import yfinance as _yf
+                    try:
+                        cyear, cmonth, _ = get_front_month_contract(dt_target, prefix)
+                        candidates = []
+                        for offset in range(4):
+                            year, month = add_month(cyear, cmonth, offset)
+                            candidates.append(f"/{prefix}{DELIVERY_MONTH_CODES[month]}{year % 100:02d}")
+                        quote_res = requests.get(
+                            "https://api.schwabapi.com/marketdata/v1/quotes",
+                            params={"symbols": ",".join([f"/{prefix}", *candidates])},
+                            headers={"Authorization": f"Bearer {access_token}"},
+                            timeout=10,
+                        )
+                        quote_res.raise_for_status()
+                        active = extract_schwab_active_future_symbol(quote_res.json(), prefix)
+                        if active:
+                            print(f"[ingest] {prefix} front-month resolved via Schwab metadata: {active}")
+                            return active
+                        print(f"[ingest] {prefix} Schwab response did not declare an active contract.")
+                    except Exception as schwab_err:
+                        print(f"[ingest] {prefix} Schwab active-contract lookup failed: {schwab_err}.")
+
                     yf_root = "RB=F" if prefix == "RB" else "HO=F"
                     try:
                         underlying = _yf.Ticker(yf_root).info.get('underlyingSymbol')

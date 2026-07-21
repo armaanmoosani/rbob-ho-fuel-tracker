@@ -1328,26 +1328,45 @@ class TestCategory12ProductionFailureProtection(unittest.TestCase):
 
     @patch('main.yf.Ticker')
     @patch('main.requests.get')
-    def test_12_5a_active_schwab_symbol_resolution_prefers_high_volume(self, mock_get, mock_yf):
-        # Mock yfinance to return no underlyingSymbol so this test exercises
-        # the Schwab-volume fallback path (the path this test was designed for).
-        mock_yf.return_value.info.get.return_value = None
+    def test_12_5a_active_schwab_symbol_resolution_uses_schwab_metadata(self, mock_get, mock_yf):
+        """A deferred contract's higher open interest must not override Schwab's mapping."""
         mock_response = MagicMock()
         mock_response.raise_for_status.return_value = None
         mock_response.json.return_value = {
-            '/RBK26': {'quote': {'symbol': '/RBK26', 'lastPrice': 2.10, 'volume': 100}},
-            '/RBM26': {'quote': {'symbol': '/RBM26', 'lastPrice': 2.15, 'volume': 1000}},
-            '/RBN26': {'quote': {'symbol': '/RBN26', 'lastPrice': 2.20, 'volume': 10}},
+            '/RB': {'reference': {'futureActiveSymbol': '/RBQ26'}},
+            '/RBQ26': {'quote': {'symbol': '/RBQ26', 'openInterest': 100}},
+            '/RBU26': {'quote': {'symbol': '/RBU26', 'openInterest': 100000}},
         }
         mock_get.return_value = mock_response
 
         resolved = main.resolve_active_schwab_symbol(
             'RB',
-            datetime(2026, 5, 22, 12, 0, tzinfo=pytz.utc),
+            pytz.timezone('America/Chicago').localize(datetime(2026, 7, 20, 12, 0)),
             'dummy_token'
         )
 
-        self.assertEqual(resolved, '/RBM26')
+        self.assertEqual(resolved, '/RBQ26')
+        mock_yf.assert_not_called()
+
+    def test_12_5a_active_symbol_extraction_supports_future_is_active(self):
+        response = {
+            '/HOQ26': {
+                'quote': {'symbol': '/HOQ26', 'openInterest': 100},
+                'reference': {'futureIsActive': True},
+            },
+            '/HOU26': {
+                'quote': {'symbol': '/HOU26', 'openInterest': 100000},
+                'reference': {'futureIsActive': False},
+            },
+        }
+        self.assertEqual(main.extract_schwab_active_future_symbol(response, 'HO'), '/HOQ26')
+
+    def test_12_5a_active_symbol_extraction_rejects_ambiguous_flags(self):
+        response = {
+            '/RBQ26': {'reference': {'futureIsActive': True}},
+            '/RBU26': {'reference': {'futureIsActive': 'true'}},
+        }
+        self.assertIsNone(main.extract_schwab_active_future_symbol(response, 'RB'))
 
     @patch('main.yf.Ticker')
     @patch('main.requests.get')
@@ -1473,6 +1492,57 @@ class TestCategory12ProductionFailureProtection(unittest.TestCase):
 
         self.assertEqual(res['schwab_symbol'], '/RBN26')
         self.assertEqual(res['current_price'], 2.20)
+        mock_resolve.assert_not_called()
+
+    @patch('main.save_price_history')
+    @patch('main.load_price_history', return_value=[])
+    @patch('main.save_alert_state')
+    @patch('main.load_alert_state')
+    @patch('main.yf.Ticker')
+    @patch('main.requests.get')
+    @patch('main.resolve_active_schwab_symbol')
+    @patch('main.get_schwab_declared_active_symbol', return_value='/RBQ26')
+    def test_12_5c_cached_symbol_updates_when_schwab_rolls(
+        self, mock_declared, mock_resolve, mock_get, mock_ticker, mock_load,
+        mock_save, mock_load_history, mock_save_history
+    ):
+        mock_load.return_value = {'ACTIVE_SYMBOL_RB_2026-07-20': '/RBU26'}
+
+        quote_response = MagicMock()
+        quote_response.raise_for_status.return_value = None
+        quote_response.json.return_value = {
+            '/RBQ26': {
+                'quote': {
+                    'lastPrice': 3.20,
+                    'openPrice': 3.15,
+                    'highPrice': 3.22,
+                    'lowPrice': 3.12,
+                    'closePrice': 3.18,
+                }
+            }
+        }
+        mock_get.return_value = quote_response
+
+        mock_history = MagicMock()
+        mock_history.history.side_effect = [
+            pd.DataFrame(
+                {'Close': [3.20], 'High': [3.22], 'Low': [3.12]},
+                index=[datetime(2026, 7, 20, tzinfo=pytz.utc)],
+            ),
+            pd.DataFrame(
+                {'Close': [3.18]},
+                index=[datetime(2026, 7, 20, tzinfo=pytz.utc)],
+            ),
+        ]
+        mock_ticker.return_value = mock_history
+
+        now = pytz.timezone('America/Chicago').localize(datetime(2026, 7, 20, 12, 0))
+        result = main.fetch_commodity('RB', {'name': 'Wholesale Gas'}, now, 'token')
+
+        self.assertEqual(result['schwab_symbol'], '/RBQ26')
+        self.assertEqual(result['baseline_schwab_symbol'], '/RBQ26')
+        self.assertEqual(result['_alert_state_updates']['ACTIVE_SYMBOL_RB_2026-07-20'], '/RBQ26')
+        mock_declared.assert_called_once()
         mock_resolve.assert_not_called()
 
     @patch('main.save_price_history')
