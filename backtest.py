@@ -6,6 +6,8 @@ import pandas as pd
 import numpy as np
 import validate_data
 from futures_util import is_contract_roll_day
+import pytz
+from datetime import datetime
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 CSV_PATH = os.path.join(DATA_DIR, "graves_history.csv")
@@ -62,6 +64,9 @@ def save_metrics_cache(cfg):
         if k.startswith("RB_") or k.startswith("HO_"):
             output_keys.append(k)
     cache_data = {k: cfg[k] for k in output_keys if k in cfg}
+    cache_data["CALIBRATION_EFFECTIVE_SESSION"] = datetime.now(
+        pytz.timezone("America/Chicago")
+    ).date().isoformat()
     
     tmp_path = METRICS_CACHE_PATH + ".tmp"
     with open(tmp_path, "w") as f:

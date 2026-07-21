@@ -92,6 +92,7 @@ TZ = pytz.timezone('America/Chicago')
 os.makedirs(REPORTS_DIR, exist_ok=True)
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 MIN_LIVE_PREDICTIONS_FOR_SIGNIFICANCE = 30
+CAPTURED_CONVICTION_LABELS = ["Low Conviction", "Moderate Conviction", "High Conviction"]
 
 def load_config():
     defaults = {
@@ -135,6 +136,28 @@ def summarize_prediction_source(df_source, now_chicago, dispatch_rate):
     }
 
 
+def summarize_captured_convictions(df_source):
+    """Report conviction performance only from labels recorded at decision time."""
+    required = {"conviction_provenance", "conviction_label", "predicted_direction"}
+    if not required.issubset(df_source.columns):
+        return {label: {"alerts": 0, "precision": 0.0, "savings_cents": 0.0} for label in CAPTURED_CONVICTION_LABELS}
+    captured = df_source[
+        (df_source["conviction_provenance"] == "captured")
+        & (df_source["conviction_label"].isin(CAPTURED_CONVICTION_LABELS))
+        & (df_source["predicted_direction"].isin(["HIKE", "DROP"]))
+    ]
+    summary = {}
+    for label in CAPTURED_CONVICTION_LABELS:
+        rows = captured[captured["conviction_label"] == label]
+        alerts = len(rows)
+        summary[label] = {
+            "alerts": alerts,
+            "precision": float(rows["is_correct"].mean() * 100) if alerts else 0.0,
+            "savings_cents": float(rows["savings_cents"].sum()) if alerts else 0.0,
+        }
+    return summary
+
+
 def significance_available(live_prediction_count, resolved_live_count):
     return (
         live_prediction_count >= MIN_LIVE_PREDICTIONS_FOR_SIGNIFICANCE
@@ -164,6 +187,10 @@ def main():
     log_df['prediction_source'] = log_df['prediction_source'].fillna('').astype(str).str.strip()
     log_df.loc[~log_df['prediction_source'].isin(['live', 'backfill', 'unlabelled']), 'prediction_source'] = 'unlabelled'
     log_df.loc[log_df['prediction_source'] == '', 'prediction_source'] = 'unlabelled'
+    for col in ("conviction_provenance", "conviction_label"):
+        if col not in log_df.columns:
+            log_df[col] = "unknown"
+        log_df[col] = log_df[col].fillna("unknown").astype(str)
 
     # Backfill PENDING outcomes
     updates_made = False
@@ -228,6 +255,17 @@ def main():
     unlabelled_df = resolved_df[resolved_df['prediction_source'] == 'unlabelled'].copy()
     live_summary = summarize_prediction_source(live_df, now_chicago, dispatch_rate)
     backfill_summary = summarize_prediction_source(backfill_df, now_chicago, dispatch_rate)
+    captured_convictions = summarize_captured_convictions(live_df)
+    captured_conviction_count = sum(item["alerts"] for item in captured_convictions.values())
+    conviction_rows_html = "".join(
+        f"<tr style='border-bottom: 1px solid #f1f5f9;'>"
+        f"<td style='padding: 8px 0; color: #475569;'>{label}</td>"
+        f"<td style='padding: 8px 0; text-align: right; color: #0f172a;'>{item['alerts']}</td>"
+        f"<td style='padding: 8px 0; text-align: right; color: #0f172a;'>{item['precision']:.1f}%</td>"
+        f"<td style='padding: 8px 0; text-align: right; color: #0f172a;'>{item['savings_cents']:+.2f}¢</td>"
+        f"</tr>"
+        for label, item in captured_convictions.items()
+    )
     live_prediction_count = int((log_df['prediction_source'] == 'live').sum())
     backfill_prediction_count = int((log_df['prediction_source'] == 'backfill').sum())
     unlabelled_prediction_count = int((log_df['prediction_source'] == 'unlabelled').sum())
@@ -693,6 +731,15 @@ def main():
                                             <div style="color: #10b981; font-size: 10px; font-style: italic; margin-top: 2px;">~${est_realized_lifetime_dollars:,.2f} Est. Realized ({dispatch_rate * 100:.0f}% dispatch rate)</div>
                                         </td>
                                     </tr>
+                                </table>
+
+                                <h3 style="color: #334155; font-size: 16px; margin: 24px 0 12px 0; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; font-weight: 600;">Captured Live Conviction Performance</h3>
+                                <p style="margin: 0 0 8px 0; font-size: 12px; color: #64748b; line-height: 1.5;">{captured_conviction_count} resolved active live alerts have a conviction label captured at decision time. Legacy and backfilled rows are excluded.</p>
+                                <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 24px; font-size: 13px;">
+                                    <tr style="border-bottom: 2px solid #e2e8f0; color: #64748b; text-align: left;">
+                                        <th style="padding: 8px 0;">Conviction</th><th style="padding: 8px 0; text-align: right;">Alerts</th><th style="padding: 8px 0; text-align: right;">Precision</th><th style="padding: 8px 0; text-align: right;">Savings</th>
+                                    </tr>
+                                    {conviction_rows_html}
                                 </table>
 
                                 <!-- BACKFILLED ESTIMATES SECTION -->

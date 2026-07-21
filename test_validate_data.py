@@ -113,6 +113,22 @@ class TestValidateData(unittest.TestCase):
             "baseline_source": ["schwab_close_price", "graves_history"],
             "settlement_captured_at": ["2026-05-20T13:35:00-05:00", ""],
             "contract_provenance_status": ["verified", "unknown"],
+            "log_schema_version": ["2", "2"],
+            "nymex_daily_std_used": ["unknown", "unknown"],
+            "z_score_used": ["unknown", "unknown"],
+            "conviction_label": ["unknown", "unknown"],
+            "conviction_provenance": ["unknown", "unknown"],
+            "hike_threshold_used": ["unknown", "unknown"],
+            "drop_threshold_used": ["unknown", "unknown"],
+            "lean_hike_threshold_used": ["unknown", "unknown"],
+            "lean_drop_threshold_used": ["unknown", "unknown"],
+            "signal_price_used": ["unknown", "unknown"],
+            "baseline_price_used": ["unknown", "unknown"],
+            "runtime_config_hash": ["unknown", "unknown"],
+            "config_file_hash": ["unknown", "unknown"],
+            "metrics_cache_hash": ["unknown", "unknown"],
+            "calibration_effective_session": ["unknown", "unknown"],
+            "calibration_artifact_id": ["unknown", "unknown"],
         })
         df.to_csv(self.log_path, index=False)
         # Should not raise exception

@@ -4,6 +4,7 @@ import pandas as pd
 import hashlib
 import json
 import re
+import math
 from datetime import date, timedelta
 
 def get_good_friday(year):
@@ -248,6 +249,12 @@ def validate_prediction_log(log_path):
         "timestamp", "commodity", "predicted_direction", "actual_next_day_move_cents",
         "prediction_source", "signal_contract", "baseline_contract", "settlement_source",
         "baseline_source", "settlement_captured_at", "contract_provenance_status",
+        "log_schema_version", "nymex_daily_std_used", "z_score_used",
+        "conviction_label", "conviction_provenance", "hike_threshold_used",
+        "drop_threshold_used", "lean_hike_threshold_used", "lean_drop_threshold_used",
+        "signal_price_used", "baseline_price_used", "runtime_config_hash",
+        "config_file_hash", "metrics_cache_hash", "calibration_effective_session",
+        "calibration_artifact_id",
     ]
     for col in required_cols:
         if col not in df.columns:
@@ -276,6 +283,57 @@ def validate_prediction_log(log_path):
     if not df['contract_provenance_status'].isin(valid_provenance).all():
         invalid = df[~df['contract_provenance_status'].isin(valid_provenance)]['contract_provenance_status'].unique()
         print(f"Data validation failed: Invalid contract provenance status(es) in prediction log: {invalid}")
+        sys.exit(1)
+
+    captured_labels = {"Low Conviction", "Moderate Conviction", "High Conviction"}
+    valid_conviction_provenance = {"captured", "suppressed", "unknown"}
+    if not df['conviction_provenance'].isin(valid_conviction_provenance).all():
+        print("Data validation failed: Invalid conviction provenance in prediction log.")
+        sys.exit(1)
+
+    live_v3 = df[(df['prediction_source'] == 'live') & (df['log_schema_version'].astype(str) == '3')]
+    if (live_v3['conviction_provenance'] == 'unknown').any():
+        print("Data validation failed: New live row cannot have unknown conviction provenance.")
+        sys.exit(1)
+    captured = live_v3[live_v3['conviction_provenance'] == 'captured']
+    if not captured['conviction_label'].isin(captured_labels).all():
+        print("Data validation failed: Captured live conviction is missing or invalid.")
+        sys.exit(1)
+    numeric_capture_cols = [
+        "nymex_daily_std_used", "z_score_used", "hike_threshold_used",
+        "drop_threshold_used", "lean_hike_threshold_used", "lean_drop_threshold_used",
+        "signal_price_used", "baseline_price_used",
+    ]
+    for col in numeric_capture_cols:
+        for value in captured[col]:
+            try:
+                if not math.isfinite(float(value)):
+                    raise ValueError()
+            except (TypeError, ValueError):
+                print(f"Data validation failed: Captured live conviction has invalid {col}.")
+                sys.exit(1)
+    for _, row in captured.iterrows():
+        if not re.fullmatch(r"[0-9a-f]{64}", str(row['runtime_config_hash'])):
+            print("Data validation failed: Captured live conviction lacks runtime config hash.")
+            sys.exit(1)
+        for col in ('config_file_hash', 'metrics_cache_hash'):
+            value = str(row[col])
+            if value != 'missing' and not re.fullmatch(r"[0-9a-f]{64}", value):
+                print(f"Data validation failed: Captured live conviction has invalid {col}.")
+                sys.exit(1)
+        session = str(row['calibration_effective_session'])
+        if session != 'unknown' and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", session):
+            print("Data validation failed: Captured live conviction has invalid calibration session.")
+            sys.exit(1)
+        artifact = str(row['calibration_artifact_id'])
+        expected_artifact = f"metrics:{str(row['metrics_cache_hash'])[:16]}"
+        if str(row['metrics_cache_hash']) != 'missing' and artifact != expected_artifact:
+            print("Data validation failed: Captured live conviction has mismatched calibration artifact.")
+            sys.exit(1)
+
+    suppressed = live_v3[live_v3['conviction_provenance'] == 'suppressed']
+    if not suppressed.empty and not (suppressed['conviction_label'] == 'Not evaluated').all():
+        print("Data validation failed: Suppressed live row must not claim a conviction label.")
         sys.exit(1)
 
     for idx, val in enumerate(df['actual_next_day_move_cents']):

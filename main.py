@@ -43,6 +43,7 @@ TO_EMAIL             = [e.strip() for e in _to_email_raw.split(',') if e.strip()
 
 import re
 import csv
+import hashlib
 
 def mask_recipient(address):
     if not address:
@@ -143,6 +144,12 @@ PREDICTION_LOG_COLUMNS = [
     "prediction_source", "signal_contract", "baseline_contract",
     "settlement_source", "baseline_source", "settlement_captured_at",
     "contract_provenance_status",
+    "log_schema_version", "nymex_daily_std_used", "z_score_used",
+    "conviction_label", "conviction_provenance", "hike_threshold_used",
+    "drop_threshold_used", "lean_hike_threshold_used", "lean_drop_threshold_used",
+    "signal_price_used", "baseline_price_used", "runtime_config_hash",
+    "config_file_hash", "metrics_cache_hash", "calibration_effective_session",
+    "calibration_artifact_id",
 ]
 DEFAULT_APP_CONFIG = {
     "MIN_ROWS_FOR_TUNING": 30,
@@ -359,7 +366,47 @@ def load_settlement_snapshot(prefix, data, session_str):
     return snapshot["price"]
 
 
-def append_prediction_log(prefix, now, direction, change_cents, threshold, provenance):
+def file_sha256(path):
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return "missing"
+
+
+def decision_provenance(prefix, signal_price, baseline_price, *, nymex_daily_std=None,
+                        z_score=None, conviction_label="Not evaluated",
+                        conviction_provenance="suppressed"):
+    """Capture every decision-time input needed to audit a conviction label."""
+    config_hash = file_sha256(CONFIG_PATH)
+    metrics_hash = file_sha256(METRICS_CACHE_PATH)
+    runtime_json = json.dumps(APP_CONFIG, sort_keys=True, separators=(",", ":"), default=str)
+    runtime_hash = hashlib.sha256(runtime_json.encode("utf-8")).hexdigest()
+    artifact_id = f"metrics:{metrics_hash[:16]}" if metrics_hash != "missing" else "unknown"
+
+    return {
+        "log_schema_version": "3",
+        "nymex_daily_std_used": (
+            f"{float(nymex_daily_std):.4f}" if nymex_daily_std is not None else "not_evaluated"
+        ),
+        "z_score_used": f"{float(z_score):.6f}" if z_score is not None else "not_evaluated",
+        "conviction_label": conviction_label,
+        "conviction_provenance": conviction_provenance,
+        "hike_threshold_used": f"{APP_CONFIG.get(f'{prefix}_HIKE_THRESHOLD_CENTS', 1.0):.4f}",
+        "drop_threshold_used": f"{APP_CONFIG.get(f'{prefix}_DROP_THRESHOLD_CENTS', -1.0):.4f}",
+        "lean_hike_threshold_used": f"{APP_CONFIG.get(f'{prefix}_LEAN_HIKE_CENTS', 0.5):.4f}",
+        "lean_drop_threshold_used": f"{APP_CONFIG.get(f'{prefix}_LEAN_DROP_CENTS', -0.5):.4f}",
+        "signal_price_used": f"{float(signal_price):.4f}",
+        "baseline_price_used": f"{float(baseline_price):.4f}",
+        "runtime_config_hash": runtime_hash,
+        "config_file_hash": config_hash,
+        "metrics_cache_hash": metrics_hash,
+        "calibration_effective_session": APP_CONFIG.get("CALIBRATION_EFFECTIVE_SESSION", "unknown"),
+        "calibration_artifact_id": artifact_id,
+    }
+
+
+def append_prediction_log(prefix, now, direction, change_cents, threshold, provenance, decision):
     log_path = os.path.join(DATA_DIR, "prediction_log.csv")
     file_exists = os.path.exists(log_path)
     local_now = now.astimezone(TZ)
@@ -389,6 +436,7 @@ def append_prediction_log(prefix, now, direction, change_cents, threshold, prove
         "baseline_source": provenance.get("baseline_source", "unknown"),
         "settlement_captured_at": provenance.get("settlement_captured_at", ""),
         "contract_provenance_status": provenance.get("status", "unknown"),
+        **{column: decision.get(column, "unknown") for column in PREDICTION_LOG_COLUMNS[15:]},
     }
     with open(log_path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=PREDICTION_LOG_COLUMNS, lineterminator="\n")
@@ -578,7 +626,8 @@ def build_rack_signal(prefix, data, now):
             f"settlement contract ({provenance['baseline_contract']})."
         )
         try:
-            append_prediction_log(prefix, now, "FLAT", 0.0, 0.0, provenance)
+            decision = decision_provenance(prefix, signal_price, yest)
+            append_prediction_log(prefix, now, "FLAT", 0.0, 0.0, provenance, decision)
         except Exception as e:
             print(f"Failed to write prediction log: {e}")
         return {
@@ -645,7 +694,8 @@ def build_rack_signal(prefix, data, now):
             risk_text += " WARNING: Corrupt config.json detected! System has rolled back to defaults."
             
         try:
-            append_prediction_log(prefix, now, "FLAT", 0.0, 0.0, provenance)
+            decision = decision_provenance(prefix, signal_price, yest)
+            append_prediction_log(prefix, now, "FLAT", 0.0, 0.0, provenance, decision)
         except Exception as e:
             print(f"Failed to write prediction log: {e}")
 
@@ -769,7 +819,11 @@ def build_rack_signal(prefix, data, now):
     try:
         direction = "HIKE" if "BUY" in action else "DROP" if "WAIT" in action else "FLAT"
         thresh = hike_thresh if "BUY" in action else drop_thresh if "WAIT" in action else 0.0
-        append_prediction_log(prefix, now, direction, change_cents, thresh, provenance)
+        decision = decision_provenance(
+            prefix, signal_price, yest, nymex_daily_std=nymex_daily_std,
+            z_score=z_score, conviction_label=conviction, conviction_provenance="captured",
+        )
+        append_prediction_log(prefix, now, direction, change_cents, thresh, provenance, decision)
     except Exception as e:
         print(f"Failed to write prediction log: {e}")
 

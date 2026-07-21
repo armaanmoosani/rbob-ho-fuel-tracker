@@ -1665,7 +1665,7 @@ class TestCategory13LiveValidationAndRobustness(unittest.TestCase):
                             # Write a minimal valid prediction_log.csv so validate_all passes
                             log_path = os.path.join(self.temp_dir, "prediction_log.csv")
                             with open(log_path, "w") as f:
-                                f.write("timestamp,commodity,predicted_direction,nymex_move_cents,lag_used,window_used,threshold_used,actual_next_day_move_cents,prediction_source,signal_contract,baseline_contract,settlement_source,baseline_source,settlement_captured_at,contract_provenance_status\n")
+                                f.write("timestamp,commodity,predicted_direction,nymex_move_cents,lag_used,window_used,threshold_used,actual_next_day_move_cents,prediction_source,signal_contract,baseline_contract,settlement_source,baseline_source,settlement_captured_at,contract_provenance_status,log_schema_version,nymex_daily_std_used,z_score_used,conviction_label,conviction_provenance,hike_threshold_used,drop_threshold_used,lean_hike_threshold_used,lean_drop_threshold_used,signal_price_used,baseline_price_used,runtime_config_hash,config_file_hash,metrics_cache_hash,calibration_effective_session,calibration_artifact_id\n")
                             # Write a minimal config.json so validate_all does not error on JSON check
                             config_path = os.path.join(self.temp_dir, "config.json")
                             with open(config_path, "w") as f:
@@ -1701,7 +1701,7 @@ class TestCategory13LiveValidationAndRobustness(unittest.TestCase):
             
         # Empty prediction log initially
         with open(self.log_path, "w") as f:
-            f.write("timestamp,commodity,predicted_direction,nymex_move_cents,lag_used,window_used,threshold_used,actual_next_day_move_cents,prediction_source,signal_contract,baseline_contract,settlement_source,baseline_source,settlement_captured_at,contract_provenance_status\n")
+            f.write("timestamp,commodity,predicted_direction,nymex_move_cents,lag_used,window_used,threshold_used,actual_next_day_move_cents,prediction_source,signal_contract,baseline_contract,settlement_source,baseline_source,settlement_captured_at,contract_provenance_status,log_schema_version,nymex_daily_std_used,z_score_used,conviction_label,conviction_provenance,hike_threshold_used,drop_threshold_used,lean_hike_threshold_used,lean_drop_threshold_used,signal_price_used,baseline_price_used,runtime_config_hash,config_file_hash,metrics_cache_hash,calibration_effective_session,calibration_artifact_id\n")
             
         old_csv = backfiller.CSV_PATH
         old_log = backfiller.LOG_PATH
@@ -1998,6 +1998,7 @@ class TestCategory14ConfigSplit(unittest.TestCase):
                 cache_after = json.load(f)
             self.assertIn("RB_HIKE_THRESHOLD_CENTS", cache_after)
             self.assertEqual(cache_after["RB_HIKE_THRESHOLD_CENTS"], 1.0)
+            self.assertRegex(cache_after["CALIBRATION_EFFECTIVE_SESSION"], r"^\d{4}-\d{2}-\d{2}$")
         finally:
             backtest.CONFIG_PATH = orig_config_path
             backtest.METRICS_CACHE_PATH = orig_metrics_path

@@ -40,5 +40,6 @@
   "RB_opt_Hp": 25,
   "RB_opt_Dp": 90,
   "HO_opt_Hp": 15,
-  "HO_opt_Dp": 90
+  "HO_opt_Dp": 90,
+  "CALIBRATION_EFFECTIVE_SESSION": "2026-07-20"
 }

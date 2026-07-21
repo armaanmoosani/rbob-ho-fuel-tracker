@@ -23,6 +23,12 @@ PREDICTION_LOG_COLUMNS = [
     "prediction_source", "signal_contract", "baseline_contract",
     "settlement_source", "baseline_source", "settlement_captured_at",
     "contract_provenance_status",
+    "log_schema_version", "nymex_daily_std_used", "z_score_used",
+    "conviction_label", "conviction_provenance", "hike_threshold_used",
+    "drop_threshold_used", "lean_hike_threshold_used", "lean_drop_threshold_used",
+    "signal_price_used", "baseline_price_used", "runtime_config_hash",
+    "config_file_hash", "metrics_cache_hash", "calibration_effective_session",
+    "calibration_artifact_id",
 ]
 
 def main():
@@ -50,7 +56,7 @@ def main():
     df_log['prediction_source'] = df_log['prediction_source'].fillna('unlabelled')
     for col in PREDICTION_LOG_COLUMNS:
         if col not in df_log.columns:
-            df_log[col] = "unknown" if col.endswith("contract") or col.endswith("source") or col.endswith("status") else ""
+            df_log[col] = "unknown"
     
     # Parse existing log dates for matching
     df_log['date_only'] = df_log['timestamp'].apply(lambda x: x.split('T')[0] if isinstance(x, str) else "")
@@ -185,6 +191,22 @@ def main():
             "baseline_source": "graves_history",
             "settlement_captured_at": "",
             "contract_provenance_status": "unknown",
+            "log_schema_version": "3",
+            "nymex_daily_std_used": "unknown",
+            "z_score_used": "unknown",
+            "conviction_label": "unknown",
+            "conviction_provenance": "unknown",
+            "hike_threshold_used": "unknown",
+            "drop_threshold_used": "unknown",
+            "lean_hike_threshold_used": "unknown",
+            "lean_drop_threshold_used": "unknown",
+            "signal_price_used": "unknown",
+            "baseline_price_used": "unknown",
+            "runtime_config_hash": "unknown",
+            "config_file_hash": "unknown",
+            "metrics_cache_hash": "unknown",
+            "calibration_effective_session": "unknown",
+            "calibration_artifact_id": "unknown",
         }
         
         backfill_records.append(new_record)
@@ -212,7 +234,7 @@ def main():
             existing_log_df['prediction_source'] = existing_log_df['prediction_source'].fillna('unlabelled')
             for col in PREDICTION_LOG_COLUMNS:
                 if col not in existing_log_df.columns:
-                    existing_log_df[col] = "unknown" if col.endswith("contract") or col.endswith("source") or col.endswith("status") else ""
+                    existing_log_df[col] = "unknown"
             existing_log_df = existing_log_df[PREDICTION_LOG_COLUMNS]
             
             final_df = pd.concat([existing_log_df, df_to_append], ignore_index=True)
