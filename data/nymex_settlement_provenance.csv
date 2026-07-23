@@ -1,3 +1,5 @@
 session_date,commodity,settlement_price,schwab_symbol,yfinance_symbol,source,captured_at,provenance_status
 2026-07-21,RB,3.4056,/RBQ26,RBQ26.NYM,schwab,2026-07-21T13:30:48.729359-05:00,verified
 2026-07-21,HO,4.1337,/HOQ26,HOQ26.NYM,schwab,2026-07-21T13:30:48.729359-05:00,verified
+2026-07-22,RB,3.4201,/RBQ26,RBQ26.NYM,schwab,2026-07-22T13:30:47.660716-05:00,verified
+2026-07-22,HO,4.1515,/HOQ26,HOQ26.NYM,schwab,2026-07-22T13:30:47.660716-05:00,verified
