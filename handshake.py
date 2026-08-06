@@ -9,6 +9,7 @@ import secrets
 import subprocess
 import sys
 import urllib.parse
+import re
 
 try:
     import requests
@@ -176,6 +177,43 @@ def exchange_code(credentials, code):
     return response.json()
 
 
+def github_repository():
+    configured = os.environ.get("GH_REPO", "").strip()
+    if configured:
+        return configured
+    try:
+        result = subprocess.run(
+            ["git", "config", "--get", "remote.origin.url"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return None
+    match = re.search(r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$", result.stdout.strip())
+    return match.group(1) if result.returncode == 0 and match else None
+
+
+def update_github_refresh_token(refresh_token):
+    """Write the OAuth token through gh stdin so it never appears in argv or logs."""
+    repository = github_repository()
+    if not repository:
+        return False, "Could not determine the GitHub repository from origin."
+    try:
+        result = subprocess.run(
+            ["gh", "secret", "set", "SCHWAB_REFRESH_TOKEN", "--repo", repository],
+            input=refresh_token,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return False, "GitHub CLI is not installed."
+    if result.returncode != 0:
+        return False, result.stderr.strip() or "GitHub CLI could not update the secret."
+    return True, None
+
+
 def run_handshake(force_configure=False):
     credentials = get_credentials(force_configure)
     state = secrets.token_urlsafe(24)
@@ -196,7 +234,12 @@ def run_handshake(force_configure=False):
     refresh_token = tokens.get("refresh_token")
     if not refresh_token:
         raise RuntimeError("Schwab responded successfully but did not return a refresh token.")
-    print("\n[SUCCESS] Update the SCHWAB_REFRESH_TOKEN GitHub secret with this value:\n")
+    updated, error = update_github_refresh_token(refresh_token)
+    if updated:
+        print("\n[SUCCESS] SCHWAB_REFRESH_TOKEN was updated in GitHub Actions secrets.")
+        return
+    print(f"\n[WARNING] Automatic GitHub secret update failed: {error}")
+    print("Update SCHWAB_REFRESH_TOKEN manually with this value:\n")
     print("======================================================================")
     print(refresh_token)
     print("======================================================================")

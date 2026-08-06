@@ -92,7 +92,7 @@ To deploy this securely to your own private repository:
 
 ### Refreshing the Schwab OAuth Token
 
-Run `python3 handshake.py` from the repository. The first run asks for the Schwab app key, app secret, and redirect URI once, then saves only those three values in your macOS Keychain. Future runs load them automatically, so you only authorize in the browser and paste the redirected URL. Use `python3 handshake.py --configure` to replace saved values or `python3 handshake.py --forget-credentials` to delete them.
+Run `python3 handshake.py` from the repository. The first run asks for the Schwab app key, app secret, and redirect URI once, then saves only those three values in your macOS Keychain. Future runs load them automatically, so you only authorize in the browser and paste the redirected URL. A successful exchange updates `SCHWAB_REFRESH_TOKEN` in this repository's GitHub Actions secrets automatically through your authenticated GitHub CLI; the token is supplied through standard input and is not printed. Use `python3 handshake.py --configure` to replace saved values or `python3 handshake.py --forget-credentials` to delete them.
 
 ---
 
