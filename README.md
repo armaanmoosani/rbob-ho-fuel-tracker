@@ -90,6 +90,10 @@ To deploy this securely to your own private repository:
    - `PHONE_SMS_ADDRESS`: Optional comma-separated SMS gateway addresses (falls back to `TO_EMAIL` if empty).
 3. **Timezone Verification**: The pipeline strictly relies on the `America/Chicago` timezone for trading hours, execution windows, and date boundaries. 
 
+### Refreshing the Schwab OAuth Token
+
+Run `python3 handshake.py` from the repository. The first run asks for the Schwab app key, app secret, and redirect URI once, then saves only those three values in your macOS Keychain. Future runs load them automatically, so you only authorize in the browser and paste the redirected URL. Use `python3 handshake.py --configure` to replace saved values or `python3 handshake.py --forget-credentials` to delete them.
+
 ---
 
 ## Testing & Verification
