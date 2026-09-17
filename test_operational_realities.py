@@ -390,7 +390,9 @@ class TestConvictionProvenance(unittest.TestCase):
             "yesterday_close": 2.000,
             "schwab_symbol": "/RBN26",
             "baseline_schwab_symbol": "/RBN26",
-            "baseline_source": "schwab_close_price",
+            # A calibration-matched baseline, so the published lean band applies
+            # rather than the wider fallback floor.
+            "baseline_source": "settlement_provenance_verified",
             "data_source": "schwab",
             "contract_provenance_required": True,
         }

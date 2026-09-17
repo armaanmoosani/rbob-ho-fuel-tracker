@@ -53,7 +53,7 @@ Expanding-origin out-of-sample: the model is fitted only on sessions before each
 | | Alerts | Precision | ¢/alert (mean) | ¢/alert (median) | Avg win | Avg loss |
 |---|---|---|---|---|---|---|
 | Unleaded gasoline (RBOB) | 432 | 93.5% (91%–95%) | +4.12 (+3.77 to +4.50) | +3.46 | 4.54¢ | 1.94¢ |
-| Diesel / heating oil (HO) | 516 | 94.6% (92%–96%) | +6.43 (+5.81 to +7.08) | +4.45 | 6.94¢ | 2.70¢ |
+| Diesel / heating oil (HO) | 568 | 94.0% (92%–96%) | +5.92 (+5.33 to +6.54) | +4.00 | 6.44¢ | 2.34¢ |
 
 Scored window: 2023-09-11 to 2026-09-16.
 
@@ -64,7 +64,7 @@ Per-gallon, on the volume you actually shift that day. A full 8,500-gallon load 
 | | ¢/gal per alert | $ per 8,500-gal load | $ per 1,000 gal |
 |---|---|---|---|
 | Unleaded gasoline (RBOB) | +4.12¢ | $351 | $41 |
-| Diesel / heating oil (HO) | +6.43¢ | $546 | $64 |
+| Diesel / heating oil (HO) | +5.92¢ | $503 | $59 |
 
 Multiply by the loads you genuinely reschedule. Summing every alert and multiplying by a full truck implies buying ahead on ~300 days a year, which needs storage no single site has.
 
@@ -75,7 +75,7 @@ Splitting the verified history at its median absolute NYMEX move:
 | | Calm sessions | Volatile sessions |
 |---|---|---|
 | Unleaded gasoline (RBOB) | 165 alerts, 89%, +1.77¢/alert | 370 alerts, 94%, +5.12¢/alert |
-| Diesel / heating oil (HO) | 246 alerts, 92%, +2.36¢/alert | 370 alerts, 97%, +8.80¢/alert |
+| Diesel / heating oil (HO) | 299 alerts, 91%, +2.09¢/alert | 370 alerts, 97%, +8.80¢/alert |
 
 **Size decisions on the calm column.** Precision is higher when moves are large, because the pass-through signal grows relative to the rack's fixed noise floor. The calm column is what a normal market looks like and is roughly a third of the cents per alert. These figures span three years and both regimes, so the headline is an average of the two rather than an extrapolation from one.
 
@@ -149,9 +149,19 @@ confidence, and guessing would inject the very error this removed.
   residual distribution; floors them at the measured live snapshot error. A
   purged walk-forward runs alongside purely as an out-of-sample *measurement* —
   no parameter is selected from it.
-- **Snapshot noise floor** — the 2:35 PM snapshot differs from the official
-  settle with a robust σ of ~0.5¢ (95th percentile ~1.2¢). Thresholds are
-  floored at that, so an alert cannot be triggered by measurement error.
+- **Baseline matches the calibration source** — the live delta is built from
+  the same recorded settle the model was fitted on, taken from
+  `nymex_settlement_provenance.csv` with its contract symbol checked against
+  today's active contract (falling back to `graves_history` on non-roll
+  sessions). Decomposing 74 live decisions showed the 1:30 PM signal price
+  matches the recorded settle to **0.000¢** while the old Schwab `closePrice`
+  baseline was off by a robust **0.511¢** — that mismatch was the entire live
+  error budget.
+- **Two noise floors** — thresholds are floored at 0.6¢ when the baseline is
+  calibration-matched, and widened to 1.2¢ at decision time when it is not.
+  Removing the mismatch is what let diesel drop from the floored ±1.20¢ to its
+  own model thresholds of +1.11/−0.74¢, which is worth about 12 more diesel
+  alerts per 250 sessions at unchanged precision.
 - **Contract roll exclusion** — sessions where the front month changes are
   excluded from calibration and suppressed live. RB and HO expire on the **last
   business day of the preceding month**; the quoted contract switches

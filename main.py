@@ -552,6 +552,14 @@ def save_settlement_snapshots(all_data, now):
 # happens when the cache and the thresholds have drifted apart.
 LOW_CONFIDENCE_CUTOFF = 0.70
 
+# Baseline sources that are the same measurement the model was fitted on, so a
+# delta built from them carries no source mismatch and the calibrated
+# thresholds apply as published.  Anything else gets the fallback floor.
+CALIBRATED_BASELINE_SOURCES = frozenset({
+    "settlement_provenance_verified",
+    "graves_history_same_contract",
+})
+
 
 def describe_confidence(probability):
     """Human label for a calibrated probability.
@@ -830,6 +838,28 @@ def build_rack_signal(prefix, data, now):
     drop_thresh = APP_CONFIG.get(f"{prefix}_DROP_THRESHOLD_CENTS", -1.0)
     lean_hike = APP_CONFIG.get(f"{prefix}_LEAN_HIKE_CENTS", 0.5)
     lean_drop = APP_CONFIG.get(f"{prefix}_LEAN_DROP_CENTS", -0.5)
+
+    # The cached thresholds assume the baseline came from the same source the
+    # model was fitted on.  When it did not, this delta carries a source
+    # mismatch worth a robust 0.51c (p95 1.04c), so the thresholds are widened
+    # to the fallback floor for this decision only.  Without this the floor
+    # reduction that unlocked the tighter thresholds would silently apply to
+    # decisions that have not earned it.
+    baseline_matches_calibration = data.get("baseline_source") in CALIBRATED_BASELINE_SOURCES
+    if not baseline_matches_calibration:
+        fallback_floor = APP_CONFIG.get("FALLBACK_NOISE_FLOOR_CENTS", 1.2)
+        widened_hike = max(hike_thresh, fallback_floor)
+        widened_drop = min(drop_thresh, -fallback_floor)
+        if (widened_hike, widened_drop) != (hike_thresh, drop_thresh):
+            print(f"[{prefix}] Baseline source '{data.get('baseline_source')}' is not the "
+                  f"calibration source; widening thresholds "
+                  f"{hike_thresh:+.2f}/{drop_thresh:+.2f} -> "
+                  f"{widened_hike:+.2f}/{widened_drop:+.2f}.")
+        hike_thresh, drop_thresh = widened_hike, widened_drop
+        lean_hike = max(lean_hike, fallback_floor)
+        lean_drop = min(lean_drop, -fallback_floor)
+    lean_hike = min(lean_hike, hike_thresh)
+    lean_drop = max(lean_drop, drop_thresh)
 
     nymex_daily_std = APP_CONFIG.get(f"{prefix}_nymex_daily_std", 1.0)
     z_score = change_cents / nymex_daily_std if nymex_daily_std > 0 else 0.0
@@ -1948,6 +1978,85 @@ def resolve_active_schwab_symbol(prefix, now, access_token, candidate_months=4):
     return candidates[0]
 
 
+# Largest baseline/Schwab disagreement still treated as an ordinary source
+# difference rather than a contract gap.  Genuine cross-contract gaps in this
+# history run 10-40 cents; normal source differences are under 1.1 cents (p95),
+# so 5 cents separates them with wide margin on both sides.
+CONTRACT_GAP_TOLERANCE = 0.05
+
+
+def load_baseline_settlement(prefix, session_date, active_symbol):
+    """Yesterday's settle, preferring the exact value the model was fitted on.
+
+    The model is calibrated on settle-to-settle deltas taken from
+    graves_history.csv.  The live path used to compute its delta against
+    Schwab's contract-specific ``closePrice`` instead, and that source mismatch
+    was the *entire* live error budget: decomposing 74 non-roll live decisions
+    showed the 1:30 PM signal price matched the recorded settle to 0.000c while
+    the baseline was off by a robust 0.51c (p95 1.04c).  The noise floor built
+    to absorb that was what pinned HO's thresholds at +/-1.20 instead of the
+    model's own +1.11/-0.74.
+
+    Preference order, most trustworthy first:
+
+    1. ``nymex_settlement_provenance.csv`` for the previous session, when its
+       recorded contract equals today's active contract.  This is the exact
+       value in graves_history (verified 82/82 to 0.000000c) *and* it carries
+       the symbol, so the contract match is proven rather than inferred.
+    2. graves_history for the previous session, when today is not a roll
+       session so the contract cannot have changed.
+    3. nothing -- the caller falls back to Schwab's closePrice, which is
+       contract-safe but source-mismatched, and the caller then widens the
+       thresholds to the fallback floor for that decision.
+
+    Returns ``(price, source, contract)`` or ``(None, None, None)``.
+    """
+    try:
+        previous = previous_nymex_business_day(session_date)
+    except Exception:
+        return None, None, None
+
+    # 1. Contract-verified provenance record.
+    provenance_path = os.path.join(DATA_DIR, "nymex_settlement_provenance.csv")
+    if os.path.exists(provenance_path):
+        try:
+            with open(provenance_path, "r", encoding="utf-8") as handle:
+                for row in csv.DictReader(handle):
+                    if (row.get("session_date") == previous.isoformat()
+                            and row.get("commodity") == prefix
+                            and row.get("provenance_status") == "verified"):
+                        recorded = (row.get("schwab_symbol") or "").strip()
+                        price = float(row["settlement_price"])
+                        if active_symbol and recorded and recorded != active_symbol:
+                            print(f"[{prefix}] Prior settlement {previous} was contract "
+                                  f"{recorded}, today is {active_symbol}; not usable as a "
+                                  f"baseline.")
+                            break
+                        return price, "settlement_provenance_verified", recorded or None
+        except Exception as exc:
+            print(f"[{prefix}] Could not read settlement provenance: {exc}")
+
+    # 2. graves_history, safe when the contract cannot have changed.
+    column = graves_nymex_column_index(prefix)
+    history_path = os.path.join(DATA_DIR, "graves_history.csv")
+    if column is None or not os.path.exists(history_path):
+        return None, None, None
+    if is_contract_roll_day(session_date, prefix):
+        return None, None, None
+    try:
+        with open(history_path, "r", encoding="utf-8") as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            for row in reader:
+                if len(row) > column and row[0].strip() == previous.isoformat():
+                    value = row[column].strip()
+                    if value:
+                        return float(value), "graves_history_same_contract", None
+    except Exception as exc:
+        print(f"[{prefix}] Could not read graves_history baseline: {exc}")
+    return None, None, None
+
+
 def fetch_commodity(prefix, cfg, now, access_token, alert_state=None):
     # Retrieve or resolve the active symbol for the session to ensure consistency
     state = alert_state if alert_state is not None else load_alert_state()
@@ -2185,21 +2294,41 @@ def fetch_commodity(prefix, cfg, now, access_token, alert_state=None):
     except Exception as e:
         print(f"[{prefix}] Failed to read statistics from CSV: {e}")
 
-    # Determine yesterday_close — prefer Schwab's contract-specific closePrice when
-    # Schwab is the data source.  Schwab closePrice is the prior-session settlement
-    # for the exact contract being tracked, so it is always safe across rolls.
-    # The CSV is NOT contract-aware: after a roll it still holds the old month's
-    # settlements, creating a cross-contract comparison that produces false % swings.
-    if data_source == 'schwab' and schwab_close > 0:
+    # Determine yesterday_close.  Prefer the recorded settlement the model was
+    # actually fitted on; fall back to Schwab's contract-specific closePrice.
+    #
+    # The previous order was reversed, always preferring Schwab's closePrice to
+    # avoid a cross-contract comparison.  That was the only defence available
+    # while is_contract_roll_day was returning False for every date, but it
+    # made every live delta disagree with the calibration by a robust 0.51c.
+    # With the roll detector repaired and the contract symbol recorded per
+    # session, the calibration-matched baseline can be used safely.
+    recorded_baseline, recorded_source, recorded_contract = load_baseline_settlement(
+        prefix, session_date, schwab_symbol)
+
+    if recorded_baseline is not None and (
+            schwab_close <= 0
+            or abs(recorded_baseline - schwab_close) <= CONTRACT_GAP_TOLERANCE):
+        yesterday_close = recorded_baseline
+        baseline_source = recorded_source
+        baseline_schwab_symbol = recorded_contract or schwab_symbol
+        print(f"[{prefix}] Baseline {yesterday_close:.4f} from {baseline_source} "
+              f"(matches the calibration source).")
+    elif data_source == 'schwab' and schwab_close > 0:
         yesterday_close = schwab_close
         baseline_source = "schwab_close_price"
         baseline_schwab_symbol = schwab_symbol
-        if csv_yesterday_close and abs(csv_yesterday_close - schwab_close) > 0.05:
-            print(f"[{prefix}] Using Schwab contract-specific closePrice ({schwab_close:.4f}) "
-                  f"as yesterday_close. CSV had {csv_yesterday_close:.4f} "
-                  f"(likely from prior contract month — ignoring to prevent cross-contract comparison).")
+        if recorded_baseline is not None:
+            # Beyond the tolerance the two cannot be the same contract, so the
+            # contract-safe value wins even though it costs threshold width.
+            print(f"[{prefix}] Recorded settlement {recorded_baseline:.4f} differs from "
+                  f"Schwab closePrice {schwab_close:.4f} by more than "
+                  f"{CONTRACT_GAP_TOLERANCE:.2f} — treating as a contract gap and using "
+                  f"Schwab. Thresholds widen to the fallback floor for this decision.")
         else:
-            print(f"[{prefix}] Using Schwab contract-specific closePrice ({schwab_close:.4f}) as yesterday_close.")
+            print(f"[{prefix}] Baseline {schwab_close:.4f} from schwab_close_price "
+                  f"(no calibration-matched settlement available). Thresholds widen to "
+                  f"the fallback floor for this decision.")
     elif csv_yesterday_close is not None:
         yesterday_close = csv_yesterday_close
         baseline_source = "graves_history_unverified"

@@ -69,10 +69,17 @@ DEFAULTS = {
     # a policy choice about how selective to be, not a fitted parameter.
     "TARGET_SIGNAL_CONFIDENCE": 0.75,
     "TARGET_LEAN_CONFIDENCE": 0.65,
-    # 95th percentile of |live snapshot - official settle| on non-roll sessions,
-    # measured from the live prediction log.  A threshold below this is fired by
-    # measurement error rather than by the market.
-    "SNAPSHOT_NOISE_FLOOR_CENTS": 1.2,
+    # Floor applied when the live baseline comes from the same source the model
+    # was fitted on.  Decomposing 74 non-roll live decisions showed the 1:30 PM
+    # signal price matches the recorded settle to 0.000c, so with a
+    # calibration-matched baseline the delta carries no measurement error at
+    # all.  0.6c is kept as insurance against an unnoticed source drift, and
+    # captures essentially all of the available alerts: HO gains 28 alerts going
+    # from 1.2 to 0.6, and only one more going from 0.6 to 0.3.
+    "SNAPSHOT_NOISE_FLOOR_CENTS": 0.6,
+    # Floor applied at decision time when the baseline is NOT the calibration
+    # source -- the old universal value, sized to the p95 of that mismatch.
+    "FALLBACK_NOISE_FLOOR_CENTS": 1.2,
     # Rows used for the final fit.  Raised from 180 after the re-dating
     # migration: measured on an identical evaluation block, lengthening the
     # window is the one change that improved calibration out of sample.
@@ -121,7 +128,8 @@ def _is_superseded(key):
 def save_metrics_cache(cfg, effective_session=None, source_history_hash=None):
     output_keys = ["ROLLING_WINDOW_DAYS", "LAG_DAYS",
                    "TARGET_SIGNAL_CONFIDENCE", "TARGET_LEAN_CONFIDENCE",
-                   "SNAPSHOT_NOISE_FLOOR_CENTS", "CALIBRATION_ERA_START"]
+                   "SNAPSHOT_NOISE_FLOOR_CENTS", "FALLBACK_NOISE_FLOOR_CENTS",
+                   "CALIBRATION_ERA_START"]
     output_keys.extend(k for k in cfg if k.startswith(("RB_", "HO_")))
     cache_data = {k: cfg[k] for k in dict.fromkeys(output_keys)
                   if k in cfg and not _is_superseded(k)}
@@ -366,7 +374,7 @@ def _history_hash(df):
 def _calibration_payload(cfg):
     keys = ["ROLLING_WINDOW_DAYS", "LAG_DAYS", "TARGET_SIGNAL_CONFIDENCE",
             "TARGET_LEAN_CONFIDENCE", "SNAPSHOT_NOISE_FLOOR_CENTS",
-            "CALIBRATION_ERA_START"]
+            "FALLBACK_NOISE_FLOOR_CENTS", "CALIBRATION_ERA_START"]
     keys.extend(key for key in cfg if key.startswith(("RB_", "HO_")))
     return {key: cfg[key] for key in sorted(set(keys)) if key in cfg}
 

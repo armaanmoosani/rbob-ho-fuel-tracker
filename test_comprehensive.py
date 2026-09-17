@@ -856,7 +856,11 @@ class TestCategory9AlertLogic(unittest.TestCase):
                     'daily_pct': 0.0,
                     'five_day_high': 2.00,
                     'five_day_low': 2.00,
-                    'thirty_day_avg': 2.00
+                    'thirty_day_avg': 2.00,
+                    # The ladder is only published at these widths when the
+                    # baseline came from the calibration source; otherwise the
+                    # thresholds widen to the fallback floor.
+                    'baseline_source': 'settlement_provenance_verified',
                 }
                 return main.build_rack_signal('RB', data, datetime.now())['action']
             
@@ -878,12 +882,41 @@ class TestCategory9AlertLogic(unittest.TestCase):
             
             # Slightly above drop_thresh (-0.99c) -> LEAN_WAIT
             self.assertEqual(get_act(1.9901), "LEAN_WAIT")
-            
-            # Slightly below lean_drop boundary (-0.5c) to avoid float precision issues -> LEAN_WAIT
+
+            # Slightly below lean_drop boundary (-0.5c) -> LEAN_WAIT
             self.assertEqual(get_act(1.994999), "LEAN_WAIT")
-            
+
             # Slightly above lean_drop (-0.49c) -> NO_EDGE
             self.assertEqual(get_act(1.9951), "NO_EDGE")
+
+    @patch('main.load_settlement_snapshot', return_value=None)
+    def test_9_6b_ladder_widens_on_a_mismatched_baseline(self, mock_load_snapshot):
+        """A baseline that is not the calibration source gets the wider floor."""
+        with patch.dict(main.APP_CONFIG, {
+            "RB_HIKE_THRESHOLD_CENTS": 1.0,
+            "RB_DROP_THRESHOLD_CENTS": -1.0,
+            "RB_LEAN_HIKE_CENTS": 0.5,
+            "RB_LEAN_DROP_CENTS": -0.5,
+            "RB_nymex_daily_std": 1.0,
+            "FALLBACK_NOISE_FLOOR_CENTS": 1.2,
+        }):
+            def get_act(current_p, source):
+                data = {
+                    'current_price': current_p, 'yesterday_close': 2.00,
+                    'open_price': 2.00, 'high_price': 2.00, 'low_price': 2.00,
+                    'daily_pct': 0.0, 'five_day_high': 2.00, 'five_day_low': 2.00,
+                    'thirty_day_avg': 2.00, 'baseline_source': source,
+                }
+                return main.build_rack_signal('RB', data, datetime.now())['action']
+
+            # +1.0c clears the published threshold but sits inside the source
+            # mismatch budget, so it fires only on a calibration-matched baseline.
+            self.assertEqual(get_act(2.010001, 'settlement_provenance_verified'), "BUY_NOW")
+            self.assertEqual(get_act(2.010001, 'schwab_close_price'), "NO_EDGE")
+            # A decisive move still fires either way.
+            self.assertEqual(get_act(2.03, 'schwab_close_price'), "BUY_NOW")
+            # An absent baseline_source is treated as unverified, not as verified.
+            self.assertEqual(get_act(2.010001, None), "NO_EDGE")
 
     def test_9_7_savings_accounting(self):
         """BUY captures the rise, WAIT captures the fall, no-edge days score 0."""

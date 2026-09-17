@@ -154,3 +154,49 @@ python3 alignment.py --scan                     # lag-1 by candidate era start
 python3 migrate_legacy_alignment.py             # dry run; re-checks every gate
 python3 -m pytest test_alignment.py -q
 ```
+
+
+---
+
+## Addendum: the live baseline source (2026-09-17)
+
+A separate source mismatch, found while confirming the post-migration
+thresholds. The model is calibrated on settle-to-settle deltas from
+`graves_history.csv`, but the live path computed its delta against Schwab's
+contract-specific `closePrice`. Decomposing 74 non-roll live decisions using the
+`signal_price_used` / `baseline_price_used` columns of the prediction log:
+
+| component | mean | robust σ | mean abs | p95 abs |
+|---|---|---|---|---|
+| signal price (1:30 PM snapshot) vs recorded settle | +0.000¢ | **0.000¢** | 0.000¢ | 0.000¢ |
+| baseline price vs recorded settle | −0.071¢ | **0.511¢** | 0.467¢ | 1.041¢ |
+| resulting delta error | +0.071¢ | 0.511¢ | 0.467¢ | 1.041¢ |
+
+The snapshot was never the problem — it reproduces the recorded settle exactly,
+because the nightly ingest writes that same snapshot into `graves_history`. The
+whole error was the baseline.
+
+Preferring Schwab's `closePrice` was the right call while `is_contract_roll_day`
+was returning False for every date: it was the only protection against
+comparing two different contracts. With the roll detector repaired and the
+contract symbol recorded per session in `nymex_settlement_provenance.csv`
+(verified to match `graves_history` 82/82 at 0.000000¢), the
+calibration-matched baseline can be used safely.
+
+`main.load_baseline_settlement` now prefers, in order:
+
+1. the previous session's provenance record, when its recorded contract equals
+   today's active contract — exact calibration match, contract *proven*;
+2. `graves_history` for the previous session, when today is not a roll session
+   so the contract cannot have changed — calibration match, contract inferred;
+3. nothing, leaving the caller on Schwab's `closePrice` — contract-safe but
+   source-mismatched.
+
+Because tier 3 still carries the mismatch, `build_rack_signal` widens the
+thresholds to `FALLBACK_NOISE_FLOOR_CENTS` (1.2¢, the old universal value) for
+that decision only. An absent `baseline_source` is treated as unverified.
+
+Result: `SNAPSHOT_NOISE_FLOOR_CENTS` dropped 1.2 → 0.6, which released HO from
+the floored ±1.20¢ to its own +1.11/−0.74¢. Out-of-sample HO alerts rose 240 →
+252 with precision 96.2% → 95.6%. RB was unaffected: its thresholds already
+cleared both floors.
