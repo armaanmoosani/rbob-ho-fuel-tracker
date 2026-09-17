@@ -58,9 +58,12 @@ import pandas as pd
 #    the last being 2025-07-28/2025-08-03, and individual rows inside them
 #    cannot be classified with confidence.
 #
-# 2025-08-04 is the first Monday strictly after that final interleaved week.
-# Re-derive both with ``python3 -m alignment --scan``.
-CALIBRATION_ERA_START = "2025-08-04"
+# ``migrate_legacy_alignment.py`` re-dated the legacy rows on 2026-09-17, so
+# both criteria are now met by the whole file and the boundary sits at its first
+# session.  The gate below still runs on every calibration: it is what would
+# catch the convention drifting again.  Re-derive with
+# ``python3 -m alignment --scan``.
+CALIBRATION_ERA_START = "2023-03-06"
 
 # Runtime drift detector.  A correctly aligned series carries almost no lag-1
 # pass-through; a series stamped one session late carries more lag-1 than lag-0.
@@ -70,9 +73,10 @@ CALIBRATION_ERA_START = "2025-08-04"
 # alarm.  Materiality and significance must BOTH fire.
 #
 # Observed values for reference:
-#   full history (two conventions mixed)  RB b1/b0 = 0.31   HO b1/b0 = 0.11
-#   verified era                          RB b1/b0 = 0.02   HO b1/b0 = 0.01
-# 0.08 sits between them with room on both sides.
+#   pre-migration file (conventions mixed)  RB b1/b0 = 0.31   HO b1/b0 = 0.11
+#   after re-dating                         RB b1/b0 = 0.02   HO b1/b0 = 0.00
+# 0.08 sits between them with room on both sides.  The pre-migration file is
+# archived and test_alignment.py asserts it is still flagged.
 MAX_LAG1_RATIO = 0.08
 DRIFT_PVALUE = 0.01
 

@@ -47,8 +47,13 @@ def pairs(prefix, df):
     return frame[keep].reset_index(drop=True)
 
 
-def rolling_out_of_sample(frame, cfg, window=180, step=10):
-    """Expanding-origin evaluation: fit on the past, score the next block."""
+def rolling_out_of_sample(frame, cfg, window=None, step=10):
+    """Expanding-origin evaluation: fit on the past, score the next block.
+
+    The window defaults to the configured ROLLING_WINDOW_DAYS so the published
+    figures describe the model that actually runs, not a different one.
+    """
+    window = int(window or cfg["ROLLING_WINDOW_DAYS"])
     alerts = correct = 0
     total = 0.0
     payoffs = []
@@ -179,12 +184,12 @@ def build(cfg=None):
             f"{split['volatile']['alerts']} alerts, {split['volatile']['precision']:.0%}, "
             f"{split['volatile']['mean_savings']:+.2f}¢/alert |")
     lines.append("")
-    lines.append("**Read this before trusting the headline.** The verified history is "
-                 "dominated by an exceptionally volatile stretch. Precision is *higher* "
-                 "when moves are large, because the pass-through signal grows relative to "
-                 "the rack's fixed noise floor — so a return to calm markets lowers both "
-                 "the hit rate and the cents per alert. Size any storage or capital "
-                 "decision on the calm column.")
+    lines.append("**Size decisions on the calm column.** Precision is higher when moves "
+                 "are large, because the pass-through signal grows relative to the rack's "
+                 "fixed noise floor. The calm column is what a normal market looks like "
+                 "and is roughly a third of the cents per alert. These figures span "
+                 "three years and both regimes, so the headline is an average of the two "
+                 "rather than an extrapolation from one.")
     lines.append("")
 
     lines.append("### Fitted pass-through")

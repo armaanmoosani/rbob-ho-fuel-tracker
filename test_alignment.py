@@ -6,6 +6,8 @@ so their rack price is matched against the following day's settle.  Calibrating
 across that boundary trains roughly 60% of the pairs on the wrong settle.
 """
 
+import os
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -42,12 +44,22 @@ def test_load_history_drops_weekends_and_sorts():
     assert list(loaded["date"].dt.strftime("%Y-%m-%d")) == ["2026-05-15", "2026-05-18"]
 
 
-def test_calibration_history_excludes_the_unverified_era():
+def test_calibration_history_honours_the_era_boundary():
+    """The whole file is calibration-eligible now that it has been re-dated.
+
+    Before the migration this excluded roughly two thirds of the rows.  The
+    mechanism is still exercised with an explicit boundary, so it cannot rot.
+    """
     full = alignment.load_history()
     clean = alignment.calibration_history(full)
-    assert len(clean) < len(full), "the legacy era must be excluded"
     assert clean["date"].min() >= pd.Timestamp(alignment.CALIBRATION_ERA_START)
-    assert len(clean) >= 200, "not enough verified rows left to calibrate on"
+    assert len(clean) >= 700, (
+        f"only {len(clean)} eligible rows; the migration should leave ~835")
+
+    cut = "2025-08-04"
+    narrowed = alignment.calibration_history(full, era_start=cut)
+    assert len(narrowed) < len(clean)
+    assert narrowed["date"].min() >= pd.Timestamp(cut)
 
 
 def test_aligned_deltas_never_spans_a_missing_observation():
@@ -81,15 +93,36 @@ def test_lag_diagnostic_catches_a_one_session_stamping_error():
     assert "mixing date conventions" in diag["reason"]
 
 
-def test_full_history_is_detected_as_misaligned():
-    """Real data: calibrating on the whole file must be refused."""
+ARCHIVE = "data/graves_history.pre_alignment_migration.csv"
+
+
+@pytest.mark.skipif(not os.path.exists(ARCHIVE), reason="pre-migration archive absent")
+def test_the_archived_pre_migration_file_is_still_detected_as_misaligned():
+    """The detector must still catch the defect it was built for.
+
+    The live file has been corrected, so it can no longer serve as the positive
+    case.  The archived original is kept precisely so this test keeps its teeth:
+    if the detector ever stops flagging it, the detector is broken.
+    """
+    before = alignment.load_history(ARCHIVE)
+    flagged = [p for p in ("RB", "HO")
+               if not alignment.lag_diagnostics(before, p)["aligned"]]
+    assert flagged, "the detector no longer flags the known-bad original file"
+    with pytest.raises(alignment.AlignmentError):
+        alignment.assert_calibration_alignment(
+            before, era_start="2023-01-01", csv_path=ARCHIVE)
+
+
+def test_the_live_history_is_now_aligned_end_to_end():
+    """The migration's purpose, asserted on the real file."""
     full = alignment.load_history()
     for prefix in ("RB", "HO"):
         diag = alignment.lag_diagnostics(full, prefix)
-        assert diag["aligned"] is False, (
-            f"{prefix}: the full history mixes conventions and must be rejected")
-    with pytest.raises(alignment.AlignmentError):
-        alignment.assert_calibration_alignment(full, era_start="2023-01-01")
+        assert diag["aligned"] is True, f"{prefix}: {diag['reason']}"
+        assert diag["n"] >= 700, f"{prefix}: only {diag['n']} usable pairs"
+        # The corrected legacy era must agree with the era that was already
+        # trusted; a pass-through slope far from it would mean a bad re-dating.
+        assert 0.5 < diag["b0"] < 1.1, f"{prefix}: implausible slope {diag['b0']}"
 
 
 def test_verified_era_passes_the_gate():

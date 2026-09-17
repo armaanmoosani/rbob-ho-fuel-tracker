@@ -666,9 +666,14 @@ class TestPointInTimeCalibrationArtifacts(unittest.TestCase):
             build.assert_not_called()
 
     def test_calibration_refuses_history_outside_the_verified_era(self):
-        """Legacy rows must not be able to re-enter calibration."""
-        legacy = self._history()
-        legacy["date"] = pd.date_range("2023-03-07", periods=len(legacy), freq="B")
-        with self.assertRaises(ValueError):
-            backtest._eligible_training_history(legacy, None)
+        """The era gate still bites when a boundary is in force.
+
+        The whole file is eligible since the re-dating migration, so this uses
+        an explicit boundary rather than relying on the configured one.
+        """
+        old_rows = self._history()
+        old_rows["date"] = pd.date_range("2019-01-01", periods=len(old_rows), freq="B")
+        with patch.object(alignment, "CALIBRATION_ERA_START", "2023-03-06"):
+            with self.assertRaises(ValueError):
+                backtest._eligible_training_history(old_rows, None)
 

@@ -106,5 +106,15 @@ def test_roll_offset_isolates_the_observed_settle_gap():
     assert best == fu.DEFAULT_EARLY_ROLL_DAYS, (
         f"the configured early-roll offset ({fu.DEFAULT_EARLY_ROLL_DAYS}) no longer "
         f"isolates the settle gap best; measured separations {separations}")
-    assert separations[best] > 2.0, (
-        "flagged roll sessions should carry a markedly larger rack residual")
+
+    # The calibrated offset must be the *only* one where flagged sessions carry
+    # a worse residual than unflagged ones.  An absolute ratio is not asserted:
+    # it depends on the regime mix in the window, falling from ~4.7x on the
+    # 2025-26 stretch alone to ~1.55x once the calmer 2023-24 years are
+    # included.  The ranking is the stable, meaningful signal.
+    assert separations[best] > 1.3, (
+        f"flagged roll sessions should carry a larger rack residual; "
+        f"measured {separations}")
+    others = [v for k, v in separations.items() if k != best]
+    assert all(v < 1.0 for v in others), (
+        f"only the calibrated offset should isolate the gap; measured {separations}")

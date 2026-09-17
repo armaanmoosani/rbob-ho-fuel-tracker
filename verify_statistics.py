@@ -89,14 +89,22 @@ def check_alignment(checks):
         for p in ("RB", "HO"))
     checks.append(Check("History alignment", True, detail))
 
-    # The full file must still be rejected; if it ever passes, either the data
-    # was repaired or the detector has stopped working.
-    rejected = [p for p in ("RB", "HO")
-                if not alignment.lag_diagnostics(full, p)["aligned"]]
-    checks.append(Check(
-        "Legacy era still detected as misaligned",
-        bool(rejected),
-        f"full history rejected for {rejected or 'nothing -- detector may be broken'}"))
+    # The detector must still catch the defect it was built for.  The live file
+    # has been re-dated, so the archived pre-migration copy is the positive
+    # case; if that ever stops being flagged, the detector is broken.
+    archive = os.path.join(DATA_DIR, "graves_history.pre_alignment_migration.csv")
+    if os.path.exists(archive):
+        before = alignment.load_history(archive)
+        rejected = [p for p in ("RB", "HO")
+                    if not alignment.lag_diagnostics(before, p)["aligned"]]
+        checks.append(Check(
+            "Detector still flags the known-bad pre-migration file",
+            bool(rejected),
+            f"archived original rejected for {rejected or 'nothing -- DETECTOR IS BROKEN'}"))
+    else:
+        checks.append(Check(
+            "Detector still flags the known-bad pre-migration file", False,
+            "pre-migration archive is missing; the detector has no positive case"))
 
 
 def check_holdout(prefix, checks):

@@ -53,10 +53,12 @@ CALIBRATION_RUNS_PATH = os.path.join(DATA_DIR, "calibration_runs.jsonl")
 CALIBRATION_PURGE_ROWS = 1
 CALIBRATION_METHOD_VERSION = "v2-passthrough-confidence"
 
-# Evaluation-only walk-forward geometry.  Sized to fit the alignment-verified
-# era; no parameter is chosen from these folds.
-EVAL_TEST_ROWS = 30
-EVAL_FOLDS = 4
+# Evaluation-only walk-forward geometry.  No parameter is chosen from these
+# folds.  Widened after the re-dating migration tripled the usable history:
+# six 45-session blocks span about 16 months, so the reported figure now covers
+# a calm regime as well as a volatile one instead of only the recent spike.
+EVAL_TEST_ROWS = 45
+EVAL_FOLDS = 6
 
 
 DEFAULTS = {
@@ -71,9 +73,17 @@ DEFAULTS = {
     # measured from the live prediction log.  A threshold below this is fired by
     # measurement error rather than by the market.
     "SNAPSHOT_NOISE_FLOOR_CENTS": 1.2,
-    # Rows used for the final fit.  Out-of-sample precision is 97.3% at 120, 180
-    # and 240, so this is fixed rather than searched.
-    "ROLLING_WINDOW_DAYS": 180,
+    # Rows used for the final fit.  Raised from 180 after the re-dating
+    # migration: measured on an identical evaluation block, lengthening the
+    # window is the one change that improved calibration out of sample.
+    #   W     RB gap   RB skill    HO gap   HO skill
+    #   120   +0.086    -0.012     +0.039    +0.068
+    #   180   +0.081    -0.027     +0.027    +0.118
+    #   240   +0.061    +0.031     +0.017    +0.149
+    #   360   +0.049    +0.063     +0.008    +0.143
+    #   500   +0.042    +0.077     +0.000    +0.140
+    # 360 takes almost all of the gain while leaving room for the folds.
+    "ROLLING_WINDOW_DAYS": 360,
     "LAG_DAYS": 0,
 }
 

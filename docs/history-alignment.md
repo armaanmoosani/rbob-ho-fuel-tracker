@@ -48,69 +48,109 @@ Consequences that were visible in the output before the fix:
   attenuating the fitted slope and depressing every historical precision
   figure.
 
-## Why the legacy rows are not repaired
+## The repair
 
-Shifting a legacy row back one session requires the settle for that earlier
-session. Under the legacy stamping **no row was ever stamped Monday**, so
-Monday settles were never backfilled and are simply absent from the file. Only
-Wednesday, Thursday and Friday sessions could be reconstructed, which would
-leave a systematic weekday hole in the training set.
+`migrate_legacy_alignment.py` performed the correction on 2026-09-17.
 
-Worse, the changeover was not clean. Seven weeks contain rows from both
-conventions — a Monday row and a Saturday row in the same week — the last being
-`2025-07-28/2025-08-03`. Individual rows inside those weeks cannot be
-classified with confidence, and guessing wrong injects a one-session
-misalignment directly into the live thresholds.
+**The offset is one calendar day, not one business day.** Legacy weeks are
+stamped Tue..Sat and never Monday, which is only consistent with a fixed
+calendar shift. Using business days collides at holidays: Good Friday 2023 sent
+both the Friday and the Saturday row to Thursday 2023-04-06.
 
-## What was done instead
+**Settles came from inside the file wherever possible.** For a row stamped `D`
+moving to session `S = D - 1 day`, the row already stamped `S` holds exactly
+that session's settle, so 758 of the corrections are a byte-for-byte move of an
+existing string. Only 244 Monday settles needed an external source, because the
+legacy stamping never produced a Monday row and those settles were consequently
+never backfilled. Two corrected sessions fall on market holidays and correctly
+carry no settle.
 
-`CALIBRATION_ERA_START = 2025-08-04`, the first Monday strictly after the final
-interleaved week. It satisfies two independent criteria:
+**Which rows moved.** 502 of 846. Weeks were classified by their day-of-week
+pattern: a Saturday and no Monday means legacy, a Monday and no Saturday means
+live, both means a changeover week. Weeks showing neither were treated as legacy
+only when they predate the very first live-stamped week, since the live
+convention did not exist yet; that promotion was worth 27 rows. The seven
+changeover weeks were left untouched — rows inside them cannot be classified
+with confidence, and guessing would inject the very error this removed.
 
-1. **Statistical** — the lag-1 coefficient is insignificant for both
-   commodities from here on. On its own this criterion would permit a start as
-   early as 2024-05.
-2. **Structural** — no week after the cut contains both a Saturday and a Monday
-   row.
+### Gates
 
-The legacy rows stay in the file. They are excluded from calibration, from the
-walk-forward evaluation, and from every published statistic.
+Nothing was written until all eight passed:
 
-Two further filters do the rest of the work:
+| Gate | Result |
+|---|---|
+| A External source reproduces every legacy settle in the file | 918 checked, max deviation **0.000000** |
+| B Internally-sourced settle agrees with the external one | 758 cross-checked, max deviation **0.000000** |
+| C No two rows land on the same date | 846 rows, 846 distinct dates |
+| D Rack values conserved as a multiset | all 846 triples preserved exactly |
+| E No row created or destroyed | 846 → 846 |
+| F Rows in the already-verified era untouched | 269 rows byte-identical |
+| G The correction actually fixes the alignment | see below |
+| H Rewritten file passes `validate_graves_history` | accepted |
 
-- `alignment.aligned_deltas` keeps a pair only when the previous surviving row
-  is the immediately preceding NYMEX business day. Without it, a missing
-  session (a failed ingest, or one of the 121 rows with no settle) makes its
-  neighbours adjacent and silently turns their difference into a *two*-session
-  move scored against one-session thresholds.
-- `alignment.assert_calibration_alignment` runs before every calibration and
-  aborts if the verified window develops a lag-1 pass-through, or if
-  legacy-stamped weeks exceed 15% of the era. Isolated late-stamped Fridays are
-  expected and harmless — the weekend filter and the contiguity filter discard
-  the affected pairs — so the structural gate measures a rate, not a single
-  occurrence.
+Gate A is the one that made the rest trustworthy: the external series reproduces
+every settle already in the legacy portion of the file to zero deviation, which
+simultaneously validates the source and confirms that the file's settles are
+keyed to the stamped date. (In the *live* era the same comparison disagrees on
+about 25% of rows, because the live ingest captures contract-specific Schwab
+settles while the external series is continuous front-month. That era was not
+touched.)
 
-## Recovering the legacy era
+### Result
 
-Possible, and worth doing: it would roughly triple the calibration sample and
-let the model be validated across a calm regime as well as a volatile one.
+| | before | after |
+|---|---|---|
+| RB lag-1 coefficient | +0.157 (p < 1e-7) | **+0.013 (p = 0.44)** |
+| HO lag-1 coefficient | +0.095 (p = 6e-5) | **+0.003 (p = 0.81)** |
+| RB pass-through slope | 0.516 | 0.634 |
+| HO pass-through slope | 0.874 | 0.955 |
+| Usable pairs | 235 | **728** |
+| Legacy-stamped weeks | 109 | 1 |
 
-1. Backfill Monday NYMEX settles for 2023-03 through 2025-07 from an external
-   source (yfinance `RB=F` / `HO=F`, or Schwab price history).
-2. For each legacy row, set its session date to the previous NYMEX business day
-   of its current stamp, and re-join the settle for that corrected date.
-3. Leave the seven interleaved weeks out; they cannot be classified.
-4. Re-run `python3 alignment.py --scan`. If `b1` is insignificant across the
-   whole file, move `CALIBRATION_ERA_START` back and regenerate the README with
-   `python3 generate_readme_stats.py --write`.
+The slopes now match what the already-trusted era showed on its own (0.619 and
+0.953), which is the strongest confirmation that the re-dating is correct rather
+than merely tidier.
 
-Do not skip step 4. The alignment gate is the only thing standing between a
-stamping error and the live thresholds.
+Calibration consequences:
+
+* `CALIBRATION_ERA_START` moved to the first session, 2023-03-06.
+* `ROLLING_WINDOW_DAYS` rose 180 → 360; lengthening the fit window was the only
+  change that improved out-of-sample calibration, and it only became possible
+  with the extra history.
+* The walk-forward evaluation widened to six 45-session blocks, so the published
+  out-of-sample figure spans ~16 months across both a calm and a volatile
+  regime instead of only the recent spike.
+* **Measured precision fell** — RB 96.0% → 93.5%, ¢/alert 6.93 → 4.12. That is
+  the estimate becoming honest, not the model getting worse.
+
+## The archived original
+
+`data/graves_history.pre_alignment_migration.csv` is the file as it stood before
+the migration. It is retained deliberately: the live file is now aligned, so the
+archive is the only remaining positive test case for the alignment detector.
+`test_alignment.py::test_the_archived_pre_migration_file_is_still_detected_as_misaligned`
+and the `verify_statistics.py` check of the same name both assert it is still
+flagged. **Do not delete it** — without it, a broken detector would pass
+silently.
+
+The integrity registry was re-baselined by appending a new record for
+`graves_history.csv`. The pre-migration hash remains in the registry as the
+record of what the data was, and the evidence that the change was authorised
+sits beside it in git: the archived CSV, the migration script, and the commit
+carrying both.
+
+## What is still not corrected
+
+The seven changeover weeks listed by `alignment.convention_weeks(...)
+["interleaved"]`. They are ~30 rows out of 846 and the aggregate lag-1 test
+passes comfortably with them included, so they are left in place rather than
+guessed at.
 
 ## Verification
 
 ```bash
-python3 alignment.py          # current state of both eras
-python3 alignment.py --scan   # lag-1 coefficient by candidate start date
+python3 alignment.py                            # current state
+python3 alignment.py --scan                     # lag-1 by candidate era start
+python3 migrate_legacy_alignment.py             # dry run; re-checks every gate
 python3 -m pytest test_alignment.py -q
 ```
