@@ -1,58 +1,97 @@
-import os
-import pandas as pd
+"""End-to-end smoke test of the calibration engine's components."""
+
 import numpy as np
+import pandas as pd
+import pytest
+
+import alignment
 import backtest
+import model
 
-def test_walk_forward_flow():
-    print("Testing walk-forward components...")
-    
-    # 1. Test clamp
-    assert backtest.clamp(5.0, 1.0, 3.0) == 3.0
-    assert backtest.clamp(-5.0, -3.0, -1.0) == -3.0
-    assert backtest.clamp(2.0, 1.0, 3.0) == 2.0
-    print("[PASSED] clamp")
 
-    # 2. Mock a dataframe to test data cleaning and delta calculations
-    dates = pd.date_range(start="2026-01-01", periods=100, freq="B") # business days (excludes weekends)
-    df_mock = pd.DataFrame({
+def _synthetic(rows=400, slope=0.7, seed=5):
+    """Synthetic history inside the alignment-verified era."""
+    dates = pd.date_range(alignment.CALIBRATION_ERA_START, periods=rows, freq="B")
+    rng = np.random.default_rng(seed)
+    step = rng.normal(0, 0.03, rows)
+    nymex = 2.0 + step.cumsum()
+    rack = np.empty(rows)
+    rack[0] = 2.1
+    rack[1:] = rack[0] + (slope * step[1:] + rng.normal(0, 0.008, rows - 1)).cumsum()
+    return pd.DataFrame({
         "date": dates,
-        "nymex_rb": np.linspace(2.0, 2.5, 100) + np.random.normal(0, 0.02, 100),
-        "rack_u": np.linspace(2.1, 2.6, 100) + np.random.normal(0, 0.02, 100)
+        "nymex_rb": nymex, "nymex_ho": nymex,
+        "rack_u": rack, "rack_p": rack + 0.1, "rack_d": rack,
     })
-    
-    # Test cleaning & delta conversion
-    del_nymex, del_rack = backtest.get_clean_deltas(df_mock, "nymex_rb", "rack_u")
-    assert isinstance(del_nymex, pd.Series)
-    assert isinstance(del_rack, pd.Series)
-    assert len(del_nymex) == len(del_rack)
-    print(f"[PASSED] get_clean_deltas (cleaned length: {len(del_nymex)})")
 
-    # 3. Test threshold training
-    hike_t, drop_t = backtest.train_thresholds(del_nymex, del_rack, Hp=15, Dp=85)
-    assert 0.3 <= hike_t <= 3.0
-    assert -3.0 <= drop_t <= -0.3
-    print(f"[PASSED] train_thresholds (Hike: {hike_t:.2f}c, Drop: {drop_t:.2f}c)")
 
-    # 4. Test walk forward simulation function
-    # Mocking larger history to support folds (W=30, test_size=10, folds=3 -> needs 60 rows min)
-    df_large = pd.DataFrame({
-        "date": pd.date_range(start="2026-01-01", periods=200, freq="B"),
-        "nymex_rb": np.sin(np.linspace(0, 10, 200)) + 2.0,
-        "rack_u": np.sin(np.linspace(0, 10, 200)) + 2.1
-    })
-    
-    # Temporarily set variables inside simulate_walk_forward to run on small parameters
-    # Let's inspect simulate_walk_forward output on mock data
-    med_sav = backtest.simulate_walk_forward(df_large, "nymex_rb", "rack_u", W=100, Hp=15, Dp=85, prefix="RB")
-    assert isinstance(med_sav, float)
-    print(f"[PASSED] simulate_walk_forward (Median OOS Savings: {med_sav:+.2f}c)")
+def test_pairs_are_same_session_and_roll_free():
+    df = _synthetic()
+    frame = backtest.training_pairs(df, "RB")
+    assert not frame.empty
+    assert {"date", "delta_nymex", "delta_rack"} <= set(frame.columns)
+    # Every pair must span exactly one observed session of each series.
+    assert frame["delta_nymex"].notna().all()
+    assert frame["delta_rack"].notna().all()
+    from futures_util import is_contract_roll_day
+    assert not any(is_contract_roll_day(d.date(), "RB") for d in frame["date"])
 
-    # 5. Verify config loading and updating
+
+def test_fit_recovers_the_true_pass_through():
+    frame = backtest.training_pairs(_synthetic(slope=0.7), "RB")
+    fit = model.fit_passthrough(frame["delta_nymex"], frame["delta_rack"])
+    assert 0.6 < fit.slope < 0.8
+    assert fit.r2 > 0.8
+
+
+def test_thresholds_clear_the_noise_floor_and_bracket_zero():
+    frame = backtest.training_pairs(_synthetic(), "RB")
+    fit = model.fit_passthrough(frame["delta_nymex"], frame["delta_rack"])
+    floor = backtest.DEFAULTS["SNAPSHOT_NOISE_FLOOR_CENTS"]
+    hike, drop = model.apply_noise_floor(
+        *fit.threshold_for_confidence(backtest.DEFAULTS["TARGET_SIGNAL_CONFIDENCE"]),
+        floor)
+    assert hike >= floor
+    assert drop <= -floor
+    assert drop < 0 < hike
+
+
+def test_walk_forward_reports_out_of_sample_performance():
+    frame = backtest.training_pairs(_synthetic(), "RB")
+    result = backtest.walk_forward_evaluation(frame, backtest.DEFAULTS)
+    assert len(result["folds"]) == backtest.EVAL_FOLDS
+    assert result["alerts"] > 0
+    assert 0.0 <= result["precision"] <= 1.0
+    # A 0.7 pass-through with small noise should be comfortably profitable.
+    assert result["precision"] > 0.6
+
+
+def test_calibration_populates_every_published_key():
+    df = _synthetic()
+    cfg, message, evaluation = backtest.calibrate(df, "RB", dict(backtest.DEFAULTS))
+    for key in ("RB_HIKE_THRESHOLD_CENTS", "RB_DROP_THRESHOLD_CENTS",
+                "RB_pt_slope", "RB_pt_intercept", "RB_pt_residual_quantiles",
+                "RB_oos_precision", "RB_oos_alerts", "RB_oos_window",
+                "RB_insample_precision", "RB_wait_cvar_status"):
+        assert key in cfg, f"calibration did not publish {key}"
+    assert cfg["RB_oos_alerts"] == evaluation["alerts"]
+    assert "OOS prec=" in message
+
+
+def test_calibration_raises_rather_than_silently_falling_back():
+    """A geometry that does not fit must fail loudly.
+
+    The superseded engine returned a -9999 sentinel and reverted to a hardcoded
+    (120, 15, 85), producing plausible thresholds with no warning.
+    """
+    with pytest.raises(model.ModelFitError):
+        backtest.calibrate(_synthetic(rows=60), "RB", dict(backtest.DEFAULTS))
+
+
+def test_load_config_returns_policy_defaults():
     cfg = backtest.load_config()
     assert isinstance(cfg, dict)
-    print("[PASSED] load_config")
-
-    print("\nALL WALK-FORWARD ENGINE TESTS PASSED!")
-
-if __name__ == "__main__":
-    test_walk_forward_flow()
+    for key in ("TARGET_SIGNAL_CONFIDENCE", "SNAPSHOT_NOISE_FLOOR_CENTS",
+                "ROLLING_WINDOW_DAYS"):
+        assert key in cfg
+    assert 0.5 < cfg["TARGET_SIGNAL_CONFIDENCE"] < 1.0

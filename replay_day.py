@@ -1,9 +1,22 @@
+"""Point-in-time replay of a logged decision.
+
+What this proves and what it does not
+-------------------------------------
+It proves *reproducibility*: that re-running the recorded thresholds against
+the recorded inputs yields the verdict that was logged, using the immutable
+calibration artifact for that session rather than today's cache.
+
+It does not prove the absence of look-ahead in the calibration itself -- that
+is what ``alignment.assert_calibration_alignment`` and the purged walk-forward
+in ``backtest.py`` are for.  The previous version printed "100% deterministic
+and leakage-free", which the check does not support.
+"""
+
 import os
 import sys
 import argparse
 import json
 import pandas as pd
-import numpy as np
 
 # Ensure parent directory is in path
 sys.path.append(os.path.dirname(__file__))
@@ -16,6 +29,12 @@ LOG_PATH = os.path.join(DATA_DIR, "prediction_log.csv")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 METRICS_CACHE_PATH = os.path.join(DATA_DIR, "metrics_cache.json")
 CALIBRATION_RUNS_PATH = os.path.join(DATA_DIR, "calibration_runs.jsonl")
+
+# The live snapshot and the official settle are different measurements.  On
+# non-roll sessions their difference has a robust sigma of ~0.5c and a 95th
+# percentile of ~1.2c; a gap beyond that points at a contract mismatch rather
+# than at ordinary capture noise.
+SNAPSHOT_GAP_TOLERANCE_CENTS = 2.0
 
 
 def load_config(config_path=None, metrics_cache_path=None):
@@ -157,17 +176,32 @@ def main():
             print(f"[{comm}] => FAILURE: Prediction mismatch detected!")
             mismatches += 1
             
-        # Tolerance check on nymex move (precision check to ensure no look-ahead shift)
-        if abs(sim_change_cents - logged_move) > 1e-4:
-            print(f"[{comm}] WARNING: NYMEX change cents difference of {abs(sim_change_cents - logged_move):.4f} detected! Potential timezone/data-drift.")
+        # The logged move comes from the 1:30 PM snapshot; the replay move comes
+        # from the official settle recorded that night.  They are two different
+        # measurements of the same session and a small gap is expected, not a
+        # leak: on non-roll sessions the robust spread is about 0.5c with a 95th
+        # percentile near 1.2c.  Treating any difference as a failure made this
+        # script exit non-zero on ordinary days.
+        gap = abs(sim_change_cents - logged_move)
+        if gap > SNAPSHOT_GAP_TOLERANCE_CENTS:
+            print(f"[{comm}] WARNING: snapshot-to-settle gap of {gap:.2f}c exceeds the "
+                  f"{SNAPSHOT_GAP_TOLERANCE_CENTS:.2f}c tolerance. Check the contract "
+                  f"provenance for this session.")
             mismatches += 1
+        elif gap > 0:
+            print(f"[{comm}] snapshot-to-settle gap {gap:.2f}c (within the "
+                  f"{SNAPSHOT_GAP_TOLERANCE_CENTS:.2f}c tolerance)")
 
     print("\n==========================================")
     if mismatches == 0:
-        print("ALL TESTS PASSED: Point-in-time replay is 100% deterministic and leakage-free.")
+        print("REPLAY CONSISTENT: the logged verdict reproduces from the immutable "
+              "calibration artifact for this session.")
+        print("Note: this checks reproducibility only. Calibration leakage is "
+              "covered by alignment.assert_calibration_alignment and the purged "
+              "walk-forward in backtest.py.")
         sys.exit(0)
     else:
-        print(f"AUDIT FAILED: {mismatches} mismatch/leakage warnings detected.")
+        print(f"REPLAY FAILED: {mismatches} inconsistency/ies detected.")
         sys.exit(1)
 
 if __name__ == "__main__":

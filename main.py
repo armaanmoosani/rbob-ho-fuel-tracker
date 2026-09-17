@@ -2,6 +2,7 @@ import os
 import sys
 import io
 import json
+import math
 import uuid
 import base64
 import smtplib
@@ -44,6 +45,7 @@ TO_EMAIL             = [e.strip() for e in _to_email_raw.split(',') if e.strip()
 import re
 import csv
 import hashlib
+import model
 
 def mask_recipient(address):
     if not address:
@@ -382,7 +384,7 @@ def file_sha256(path):
 
 def decision_provenance(prefix, signal_price, baseline_price, *, nymex_daily_std=None,
                         z_score=None, conviction_label="Not evaluated",
-                        conviction_provenance="suppressed"):
+                        conviction_provenance="suppressed", signal_probability=None):
     """Capture every decision-time input needed to audit a conviction label."""
     config_hash = file_sha256(CONFIG_PATH)
     metrics_hash = file_sha256(METRICS_CACHE_PATH)
@@ -396,7 +398,10 @@ def decision_provenance(prefix, signal_price, baseline_price, *, nymex_daily_std
             f"{float(nymex_daily_std):.4f}" if nymex_daily_std is not None else "not_evaluated"
         ),
         "z_score_used": f"{float(z_score):.6f}" if z_score is not None else "not_evaluated",
-        "conviction_label": conviction_label,
+        "conviction_label": (
+            f"{conviction_label} | p={signal_probability:.4f}"
+            if signal_probability is not None else conviction_label
+        ),
         "conviction_provenance": conviction_provenance,
         "hike_threshold_used": f"{APP_CONFIG.get(f'{prefix}_HIKE_THRESHOLD_CENTS', 1.0):.4f}",
         "drop_threshold_used": f"{APP_CONFIG.get(f'{prefix}_DROP_THRESHOLD_CENTS', -1.0):.4f}",
@@ -541,6 +546,99 @@ def save_settlement_snapshots(all_data, now):
     except Exception as e:
         print(f"Warning: could not save daily_settlement.json: {e}")
 
+# A triggered alert whose calibrated probability falls below this is treated as
+# unsafe to act on.  Set just under TARGET_SIGNAL_CONFIDENCE (0.75) so it fires
+# only when the live move sits below where the threshold was placed, which
+# happens when the cache and the thresholds have drifted apart.
+LOW_CONFIDENCE_CUTOFF = 0.70
+
+
+def describe_confidence(probability):
+    """Human label for a calibrated probability.
+
+    Replaces the Z-score conviction ladder.  The bands are presentation only --
+    every consumer that needs to reason about the signal uses the probability
+    itself -- so an arbitrary boundary here cannot change a decision.
+    """
+    if probability is None:
+        return "Confidence unavailable"
+    if probability >= 0.90:
+        return f"High confidence ({probability:.0%})"
+    if probability >= 0.75:
+        return f"Moderate confidence ({probability:.0%})"
+    return f"Low confidence ({probability:.0%})"
+
+
+def build_risk_note(prefix, action, probability, expected_move):
+    """Quantitative context for one verdict, entirely derived from the cache."""
+    parts = []
+
+    if probability is not None and action in ("BUY_NOW", "WAIT", "LEAN_BUY", "LEAN_WAIT"):
+        direction = "rise" if "BUY" in action else "fall"
+        parts.append(
+            f"Model confidence: {probability:.0%} that the rack will {direction} tonight"
+            + (f", expected move {expected_move:+.2f}¢/gal." if expected_move is not None else ".")
+        )
+
+    # Alert-performance context belongs on an alert.  Quoting it on a NO_EDGE
+    # verdict describes a population the reader is not in.
+    actionable = action in ("BUY_NOW", "WAIT", "LEAN_BUY", "LEAN_WAIT")
+    oos_precision = APP_CONFIG.get(f"{prefix}_oos_precision")
+    oos_alerts = APP_CONFIG.get(f"{prefix}_oos_alerts")
+    oos_window = APP_CONFIG.get(f"{prefix}_oos_window")
+    if actionable and oos_precision is not None and oos_alerts:
+        # Wilson interval: the right one for a proportion near 1, where the
+        # normal approximation would run past 100%.
+        lo, hi = wilson_interval(round(oos_precision * oos_alerts), oos_alerts)
+        parts.append(
+            f"Out-of-sample: {oos_precision:.0%} correct on {oos_alerts} alerts "
+            f"(95% CI {lo:.0%}-{hi:.0%}) over {oos_window}. "
+            "Measured in one high-volatility regime; treat as an upper bound."
+        )
+
+    if "WAIT" in action:
+        status = APP_CONFIG.get(f"{prefix}_wait_cvar_status")
+        if status == "ok":
+            cvar = APP_CONFIG.get(f"{prefix}_wait_cvar_95")
+            low = APP_CONFIG.get(f"{prefix}_wait_cvar_low")
+            high = APP_CONFIG.get(f"{prefix}_wait_cvar_high")
+            adverse = APP_CONFIG.get(f"{prefix}_wait_adverse_probability")
+            median = APP_CONFIG.get(f"{prefix}_wait_median_move")
+            tail_n = APP_CONFIG.get(f"{prefix}_wait_cvar_tail_n")
+            sample_n = APP_CONFIG.get(f"{prefix}_wait_cvar_sample_n")
+            # Lead with the two quantities the sample can actually support, then
+            # give the tail mean with its interval and sample size.  Quoting a
+            # bare CVaR from a four-point tail, as the previous version did,
+            # implied a precision the data does not have.
+            parts.append(
+                f"Deferral risk: the rack rose on {adverse:.0%} of {sample_n} past WAIT "
+                f"signals; the median WAIT day moved {median:+.2f}¢/gal. "
+                f"Worst 5% averaged {cvar:+.2f}¢/gal "
+                f"(+${(cvar / 100.0) * TRUCK_GALLONS:,.0f} per {TRUCK_GALLONS:,}-gal truck), "
+                f"but that is only {tail_n} observations, 95% CI "
+                f"{low:+.2f} to {high:+.2f}¢/gal."
+            )
+        else:
+            parts.append(
+                "Deferral risk: too few WAIT observations to estimate the adverse "
+                "tail. Treat the downside as unquantified."
+            )
+
+    return " ".join(parts)
+
+
+def wilson_interval(successes, trials, z=1.959963985):
+    """Wilson score interval for a binomial proportion."""
+    if not trials:
+        return (float("nan"), float("nan"))
+    phat = successes / trials
+    denom = 1 + z * z / trials
+    centre = (phat + z * z / (2 * trials)) / denom
+    margin = (z / denom) * math.sqrt(
+        phat * (1 - phat) / trials + z * z / (4 * trials * trials))
+    return max(0.0, centre - margin), min(1.0, centre + margin)
+
+
 def get_decoupling_warning(prefix, now):
     try:
         log_path = os.path.join(DATA_DIR, "prediction_log.csv")
@@ -672,11 +770,7 @@ def build_rack_signal(prefix, data, now):
         try:
             _state = load_alert_state()
             _today_session = get_session_date_str(now)
-            from datetime import datetime as _dt_cls, date as _date_cls
             _now_ct = now.astimezone(TZ) if hasattr(now, 'astimezone') else now
-            _prev_session = get_session_date_str(
-                (_now_ct - timedelta(days=3)).replace(hour=12)  # go back ~3 days to find prev session
-            )
             # Walk back up to 7 days to find a non-holiday/weekend cached symbol
             from datetime import timedelta as _td
             for _back in range(1, 8):
@@ -722,23 +816,51 @@ def build_rack_signal(prefix, data, now):
         }
 
 
-    # Load dynamic thresholds and stats from config
+    # Load thresholds and the fitted pass-through model from the metrics cache.
     hike_thresh = APP_CONFIG.get(f"{prefix}_HIKE_THRESHOLD_CENTS", 1.0)
     drop_thresh = APP_CONFIG.get(f"{prefix}_DROP_THRESHOLD_CENTS", -1.0)
     lean_hike = APP_CONFIG.get(f"{prefix}_LEAN_HIKE_CENTS", 0.5)
     lean_drop = APP_CONFIG.get(f"{prefix}_LEAN_DROP_CENTS", -0.5)
-    
-    nymex_daily_std = APP_CONFIG.get(f"{prefix}_nymex_daily_std", 1.0)
 
+    nymex_daily_std = APP_CONFIG.get(f"{prefix}_nymex_daily_std", 1.0)
     z_score = change_cents / nymex_daily_std if nymex_daily_std > 0 else 0.0
-    abs_z = abs(z_score)
-    
-    if abs_z >= 1.5:
-        conviction = "High Conviction"
-    elif abs_z >= 1.0:
-        conviction = "Moderate Conviction"
-    else:
-        conviction = "Low Conviction"
+
+    # Confidence for THIS move, from the fitted residual distribution, rather
+    # than a lookup in a coarse Z-score bin.  The bins were not statistically
+    # distinguishable for RB -- high vs low precision differed by p = 0.37 and
+    # the ladder was non-monotone -- yet they gated whether the user was told to
+    # act at all.  A per-signal probability is both finer and defensible; its
+    # out-of-sample calibration is asserted in test_model.py.
+    fit = model.passthrough_from_config(APP_CONFIG, prefix)
+    if fit is None:
+        # No calibrated model means no defensible verdict.  Falling back to the
+        # default 1.0c thresholds would emit a confident-looking BUY/WAIT built
+        # on nothing, which is worse than silence for a purchasing decision.
+        try:
+            decision = decision_provenance(prefix, signal_price, yest)
+            append_prediction_log(prefix, now, "FLAT", 0.0, 0.0, provenance, decision)
+        except Exception as e:
+            print(f"Failed to write prediction log: {e}")
+        return {
+            "action": "NO_EDGE",
+            "label": "Calibration unavailable",
+            "color": "#64748b",
+            "text": (f"{name}: NO EDGE. No calibrated pass-through model is available "
+                     "for this commodity; alert suppressed."),
+            "change_cents": change_cents,
+            "basis": basis,
+            "signal_price": signal_price,
+            "threshold_cents": hike_thresh,
+            "z_score": 0.0,
+            "conviction": "Confidence unavailable",
+            "risk_text": ("Run backtest.py to regenerate data/metrics_cache.json. "
+                          "Verdicts stay suppressed until it exists."),
+            "contract_provenance": provenance,
+        }
+
+    signal_probability = float(fit.probability_correct(change_cents))
+    expected_move = float(fit.expected_rack_move(change_cents))
+    conviction = describe_confidence(signal_probability)
 
     if change_cents >= hike_thresh:
         action = "BUY_NOW"
@@ -766,51 +888,21 @@ def build_rack_signal(prefix, data, now):
         color = "#64748b"
         instruction = "Do not let this futures move alone drive the truck decision."
 
-    if conviction == "Low Conviction" and action in ["BUY_NOW", "WAIT", "LEAN_BUY", "LEAN_WAIT"]:
-        instruction = "Low Conviction — do not act on this signal unless inventory forces you to order regardless."
+    # Only withhold a recommendation when the model itself is unsure.  The
+    # threshold is already placed at TARGET_SIGNAL_CONFIDENCE, so a triggered
+    # alert below that is a sign the cache and the thresholds disagree.
+    if (signal_probability is not None
+            and signal_probability < LOW_CONFIDENCE_CUTOFF
+            and action in ("BUY_NOW", "WAIT", "LEAN_BUY", "LEAN_WAIT")):
+        instruction = (f"Only {signal_probability:.0%} confidence — do not act on this "
+                       "signal unless inventory forces you to order regardless.")
 
-    # Build Z-score bin labels for conviction note
-    if abs_z >= 1.5:
-        bin_name = "high"
-        bin_label = "High Conviction (|Z| >= 1.5)"
-    elif abs_z >= 1.0:
-        bin_name = "mod"
-        bin_label = "Moderate Conviction (1.0 <= |Z| < 1.5)"
-    else:
-        bin_name = "low"
-        bin_label = "Low Conviction (|Z| < 1.0)"
-
-    # Build quantitative risk context text
-    risk_text = ""
-    if "BUY" in action:
-        if prefix == "RB":
-            baseline_range = "53%–73%"
-            floor = "53%"
-        else:
-            baseline_range = "60%–79%"
-            floor = "60%"
-            
-        win_rate = APP_CONFIG.get(f"{prefix}_{bin_name}_z_win_rate", -1.0)
-        avg_savings = APP_CONFIG.get(f"{prefix}_{bin_name}_z_savings", 0.0)
-        
-        if win_rate >= 0.0:
-            win_rate_pct = win_rate * 100
-            conviction_part = f"similar {bin_label} alerts achieved a win rate of {win_rate_pct:.1f}% with average savings of {avg_savings:.2f}¢/gal"
-        else:
-            conviction_part = f"similar {bin_label} alerts had insufficient history to calculate stable precision"
-            
-        risk_text = (
-            f"Conviction Note: In history, {conviction_part}. "
-            f"(Multi-year baseline range: {baseline_range}; operational planning floor: {floor})."
-        )
-    elif "WAIT" in action:
-        cvar = APP_CONFIG.get(f"{prefix}_wait_upside_cvar_95", APP_CONFIG.get(f"{prefix}_historical_cvar", 3.0))
-        cvar_truck_dollars = (cvar / 100.0) * TRUCK_GALLONS
-        risk_text = (
-            f"Risk Note: On the worst 5% of WAIT-signal days historically, rack prices rose "
-            f"+{cvar:.2f}¢/gal (+${cvar_truck_dollars:,.0f} per {TRUCK_GALLONS:,}-gallon truck). "
-            f"Defer purchase only if inventory capacity allows."
-        )
+    # Quantitative context.  Every number below is either computed from the
+    # fitted model or read from an out-of-sample measurement written by the
+    # calibration run.  Nothing here is a hardcoded historical claim: the
+    # previous version pasted a "53%-73%" range taken from a README table that
+    # no script in the repository could reproduce.
+    risk_text = build_risk_note(prefix, action, signal_probability, expected_move)
 
     decoupling_warn = get_decoupling_warning(prefix, now)
     if decoupling_warn:
@@ -837,7 +929,9 @@ def build_rack_signal(prefix, data, now):
             thresh = 0.0
         decision = decision_provenance(
             prefix, signal_price, yest, nymex_daily_std=nymex_daily_std,
-            z_score=z_score, conviction_label=conviction, conviction_provenance="captured",
+            z_score=z_score, conviction_label=conviction,
+            conviction_provenance="passthrough_model_v2",
+            signal_probability=signal_probability,
         )
         append_prediction_log(prefix, now, direction, change_cents, thresh, provenance, decision)
     except Exception as e:
@@ -1288,7 +1382,7 @@ def build_html_email(subject, all_data, now, alert_context):
             if signal.get("z_score") is not None:
                 html_lines.append(
                     f'  <span style="display:inline-block;margin-top:2px;padding:1px 6px;background:#f1f5f9;border-radius:3px;font-size:10px;color:{conv_color};font-weight:700;">'
-                    f'    {signal["conviction"]} (Z-Score: {signal["z_score"]:+.2f})'
+                    f'    {signal["conviction"]}'
                     f'  </span>'
                 )
             

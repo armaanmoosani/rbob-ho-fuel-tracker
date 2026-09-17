@@ -13,6 +13,20 @@ DELIVERY_MONTH_CODES = {
     7: 'N', 8: 'Q', 9: 'U', 10: 'V', 11: 'X', 12: 'Z'
 }
 
+# Business days before the mathematical LTD at which the quoted front month
+# switches.  Calibrated against the data rather than assumed: for each candidate
+# value, flag the implied roll sessions and measure the residual of the rack
+# regression on them.  A correct value isolates the contract price gap, where
+# NYMEX jumps and the rack does not follow.
+#
+#   early_roll_days   flagged mean|resid|   unflagged mean|resid|
+#        3                  1.91 / 2.05           2.04 / 2.33     (no separation)
+#        2                  4.70 / 5.03           1.91 / 2.19     (clean separation)
+#        1                  0.84 / 2.33           2.09 / 2.32     (no separation)
+#
+# Reproduce with ``python3 -m pytest test_futures_util.py -k roll_offset``.
+DEFAULT_EARLY_ROLL_DAYS = 2
+
 
 def extract_schwab_active_future_symbol(response_json, prefix):
     """Return Schwab's declared active futures contract from quote metadata."""
@@ -166,15 +180,16 @@ def contract_last_trade_date(contract_year, contract_month, prefix):
         return crude_last_trade_date(contract_year, contract_month)
     raise ValueError(f"Unsupported futures prefix: {prefix}")
 
-def get_front_month_contract(dt, prefix, early_roll_days=3):
+def get_front_month_contract(dt, prefix, early_roll_days=None):
     """Return (contract_year, contract_month, ltd) for the active front-month contract.
 
     early_roll_days: number of NYMEX business days before the mathematical LTD at which
-    the contract is considered rolled.  CME energy markets (RB, HO) conventionally trade
-    the back month as the active contract 3-5 business days before the mathematical LTD.
-    Setting this to 3 keeps the math fallback aligned with market convention during the
-    rollover window.  The primary resolution (yfinance underlyingSymbol) overrides this.
+    the contract is considered rolled.  Defaults to ``DEFAULT_EARLY_ROLL_DAYS``, which is
+    calibrated against observed settle gaps rather than assumed -- see the constant's
+    definition.  The primary resolution (Schwab/yfinance active symbol) overrides this.
     """
+    if early_roll_days is None:
+        early_roll_days = DEFAULT_EARLY_ROLL_DAYS
     if isinstance(dt, datetime):
         today = dt.date()
     else:
@@ -197,23 +212,41 @@ def get_front_month_contract(dt, prefix, early_roll_days=3):
         contract_year, contract_month = add_month(contract_year, contract_month, 1)
     raise RuntimeError(f"Could not resolve front-month contract for {prefix}")
 
-def is_contract_roll_day(dt, prefix):
+def is_contract_roll_day(dt, prefix, early_roll_days=None):
+    """True when this session's front-month contract differs from the previous
+    session's, so a settle-to-settle difference spans two different contracts.
+
+    Defined as a *change* rather than as a calendar landmark.  The previous
+    implementation compared ``today == ltd`` against the LTD returned by
+    ``get_front_month_contract``, but that function already advances to the next
+    contract ``early_roll_days`` business days before the LTD.  By the time the
+    comparison ran, ``ltd`` was next month's LTD, so the equality could never
+    hold and the function returned False for every date of every year -- see
+    ``test_futures_util.py::test_roll_day_fires_on_contract_change``.
+
+    Comparing consecutive resolutions is immune to that class of bug: whatever
+    roll convention ``get_front_month_contract`` implements, this flags exactly
+    the session on which it switches, and only that session.  The following
+    session compares two settles of the same new contract and is clean.
+    """
     if isinstance(dt, datetime):
         today = dt.date()
     else:
         today = dt
     try:
-        cyear, cmonth, ltd = get_front_month_contract(dt, prefix)
-        if today == ltd:
-            return True
+        # A weekend or holiday is not a session, so it cannot be a roll session.
+        # Without this guard every Saturday and Sunday following a Friday roll
+        # also compares against that Friday and reports True.
+        if not is_nymex_business_day(today):
+            return False
         prev_day = previous_nymex_business_day(today)
-        prev_dt = datetime.combine(prev_day, time(12, 0))
-        p_cyear, p_cmonth, p_ltd = get_front_month_contract(prev_dt, prefix)
-        if prev_day == p_ltd:
-            return True
+        today_contract = get_front_month_contract(
+            today, prefix, early_roll_days=early_roll_days)[:2]
+        prev_contract = get_front_month_contract(
+            prev_day, prefix, early_roll_days=early_roll_days)[:2]
+        return today_contract != prev_contract
     except Exception:
-        pass
-    return False
+        return False
 
 def get_front_month_schwab_symbol(dt, prefix):
     contract_year, contract_month, _ = get_front_month_contract(dt, prefix)

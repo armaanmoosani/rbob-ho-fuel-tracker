@@ -5,10 +5,13 @@ import os
 import tempfile
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 
 import weekly_report
 import ingest_prices
+import alignment
+import model
 import validate_data
 import backtest
 import replay_day
@@ -154,7 +157,13 @@ class TestConcurrentAlertStateUpdates(unittest.TestCase):
 
 
 class TestConfigurationOverlayConsistency(unittest.TestCase):
-    def test_main_replay_and_statistics_prefer_metrics_cache(self):
+    def test_main_and_replay_prefer_metrics_cache_over_config(self):
+        """The live cache must win over the static config, everywhere.
+
+        verify_statistics is deliberately absent: it validates the model from
+        the history rather than from cached thresholds, so it has no config
+        overlay to get wrong.
+        """
         import main
         import replay_day
         import verify_statistics
@@ -169,11 +178,11 @@ class TestConfigurationOverlayConsistency(unittest.TestCase):
 
             main_cfg, _ = main.load_runtime_config(config_path, metrics_path)
             replay_cfg = replay_day.load_config(config_path, metrics_path)
-            statistics_cfg = verify_statistics.load_config(config_path, metrics_path)
 
         self.assertEqual(main_cfg["RB_HIKE_THRESHOLD_CENTS"], 2.99)
         self.assertEqual(replay_cfg["RB_HIKE_THRESHOLD_CENTS"], 2.99)
-        self.assertEqual(statistics_cfg["RB_HIKE_THRESHOLD_CENTS"], 2.99)
+        self.assertFalse(hasattr(verify_statistics, "load_config"),
+                         "verify_statistics must not read cached thresholds")
 
 
 class TestContractProvenance(unittest.TestCase):
@@ -286,6 +295,18 @@ class TestContractProvenance(unittest.TestCase):
                 validate_data.validate_daily_settlement(path)
 
 
+def _fitted_cache(prefix, slope=0.7, sigma=3.0, seed=31):
+    """A realistic serialised pass-through model for live-signal tests.
+
+    build_rack_signal suppresses the verdict entirely when no model is cached,
+    so every live-path test must supply one.
+    """
+    rng = np.random.default_rng(seed)
+    x = rng.normal(0, 8, 400)
+    y = slope * x + rng.normal(0, sigma, 400)
+    return model.passthrough_to_config(model.fit_passthrough(x, y), prefix)
+
+
 class TestConvictionProvenance(unittest.TestCase):
     def _build_live_signal(self, temp_dir):
         import main
@@ -299,6 +320,7 @@ class TestConvictionProvenance(unittest.TestCase):
             "RB_LEAN_DROP_CENTS": -0.5,
             "RB_nymex_daily_std": 10.0,
         }
+        runtime_config.update(_fitted_cache("RB"))
         data = {
             "current_price": 2.10,
             "yesterday_close": 2.00,
@@ -322,10 +344,13 @@ class TestConvictionProvenance(unittest.TestCase):
             signal, _ = self._build_live_signal(temp_dir)
             log = pd.read_csv(os.path.join(temp_dir, "prediction_log.csv"))
 
-        self.assertEqual(signal["conviction"], "Moderate Conviction")
+        self.assertIn("confidence", signal["conviction"])
         self.assertEqual(str(log.loc[0, "log_schema_version"]), "3")
-        self.assertEqual(log.loc[0, "conviction_provenance"], "captured")
-        self.assertEqual(log.loc[0, "conviction_label"], "Moderate Conviction")
+        self.assertEqual(log.loc[0, "conviction_provenance"], "passthrough_model_v2")
+        # The label carries the probability itself, so the claim can be
+        # re-derived from the log rather than trusted.
+        self.assertRegex(log.loc[0, "conviction_label"],
+                         r"^(Low|Moderate|High) confidence \(\d+%\) \| p=0\.\d+$")
         self.assertAlmostEqual(float(log.loc[0, "nymex_daily_std_used"]), 10.0)
         self.assertAlmostEqual(float(log.loc[0, "z_score_used"]), 1.0)
         self.assertRegex(log.loc[0, "runtime_config_hash"], r"^[0-9a-f]{64}$")
@@ -341,9 +366,13 @@ class TestConvictionProvenance(unittest.TestCase):
         log["is_correct"] = [True]
         summary = weekly_report.summarize_captured_convictions(log)
 
-        self.assertEqual(summary["Moderate Conviction"]["alerts"], 1)
-        self.assertEqual(summary["High Conviction"]["alerts"], 0)
-        self.assertEqual(summary["Moderate Conviction"]["precision"], 100.0)
+        # The band is read from the label recorded at decision time, so a later
+        # change to the runtime config cannot retroactively re-grade the alert.
+        recorded = log.loc[0, "conviction_label"].split(" |")[0]
+        band = recorded.split(" confidence")[0] + " confidence"
+        self.assertEqual(summary[band]["alerts"], 1)
+        self.assertEqual(summary[band]["precision"], 100.0)
+        self.assertEqual(sum(v["alerts"] for k, v in summary.items() if k != band), 0)
 
     def test_lean_signal_logs_the_threshold_that_actually_triggered(self):
         import main
@@ -355,6 +384,7 @@ class TestConvictionProvenance(unittest.TestCase):
             "RB_LEAN_DROP_CENTS": -0.5,
             "RB_nymex_daily_std": 10.0,
         }
+        runtime_config.update(_fitted_cache("RB"))
         data = {
             "current_price": 2.006,
             "yesterday_close": 2.000,
@@ -388,7 +418,8 @@ class TestConvictionProvenance(unittest.TestCase):
             self._build_live_signal(temp_dir)
             log_path = os.path.join(temp_dir, "prediction_log.csv")
             log = pd.read_csv(log_path)
-            log.loc[0, "z_score_used"] = 0.1
+            log["z_score_used"] = log["z_score_used"].astype(str)
+            log.loc[0, "z_score_used"] = "0.1"
             log.to_csv(log_path, index=False)
             with self.assertRaises(SystemExit):
                 validate_data.validate_prediction_log(log_path)
@@ -418,71 +449,86 @@ class TestConvictionProvenance(unittest.TestCase):
 
 class TestPointInTimeCalibrationArtifacts(unittest.TestCase):
     @staticmethod
-    def _history(rows=500):
-        dates = pd.date_range("2024-01-02", periods=rows, freq="B")
-        movement = pd.Series(range(rows), dtype=float).mod(11).sub(5).to_numpy() / 1000
-        rb = 2.10 + movement.cumsum()
-        ho = 2.30 + (movement * 0.8).cumsum()
+    def _history(rows=420, seed=17):
+        """Synthetic history inside the alignment-verified era.
+
+        Dates must start on or after alignment.CALIBRATION_ERA_START, because
+        calibration now refuses rows whose NYMEX/rack pairing has not been
+        verified.  The series carries a genuine positive pass-through so the
+        model can be fitted.
+        """
+        start = pd.Timestamp(alignment.CALIBRATION_ERA_START)
+        dates = pd.date_range(start, periods=rows, freq="B")
+        rng = np.random.default_rng(seed)
+        nymex_step = rng.normal(0, 0.03, rows)
+        rb = 2.10 + nymex_step.cumsum()
+        ho = 2.30 + (nymex_step * 1.1).cumsum()
+        rack_u = rb.copy()
+        rack_d = ho.copy()
+        # rack follows the settle with ~0.7 pass-through plus idiosyncratic noise
+        rack_u[1:] = rack_u[0] + (0.7 * nymex_step[1:] + rng.normal(0, 0.01, rows - 1)).cumsum()
+        rack_d[1:] = rack_d[0] + (0.9 * nymex_step[1:] * 1.1 + rng.normal(0, 0.01, rows - 1)).cumsum()
         return pd.DataFrame({
-            "date": dates,
-            "nymex_rb": rb,
-            "nymex_ho": ho,
-            "rack_u": rb + (movement * 0.2),
-            "rack_p": rb + 0.10,
-            "rack_d": ho + (movement * 0.2),
+            "date": dates, "nymex_rb": rb, "nymex_ho": ho,
+            "rack_u": rack_u, "rack_p": rb + 0.10, "rack_d": rack_d,
         })
 
     @staticmethod
     def _cfg():
-        return {
-            "BLEND_ALPHA": 0.3,
-            "RB_HIKE_THRESHOLD_CENTS": 1.0,
-            "RB_DROP_THRESHOLD_CENTS": -1.0,
-            "HO_HIKE_THRESHOLD_CENTS": 1.0,
-            "HO_DROP_THRESHOLD_CENTS": -1.0,
-            "CLAMP_HIKE_MIN": 0.3,
-            "CLAMP_HIKE_MAX": 3.0,
-            "CLAMP_DROP_MIN": -3.0,
-            "CLAMP_DROP_MAX": -0.3,
-        }
+        return dict(backtest.DEFAULTS)
 
-    @staticmethod
-    def _small_grid():
-        return {"windows": [90], "hike_percentiles": [15], "drop_percentiles": [85]}
+    def test_walk_forward_blocks_are_ordered_and_purged(self):
+        """Train, purge and test must never overlap, in any fold."""
+        frame = pd.DataFrame({
+            "date": pd.bdate_range("2025-08-01", periods=400),
+            "delta_nymex": np.linspace(-10, 10, 400),
+            "delta_rack": np.linspace(-7, 7, 400),
+        })
+        result = backtest.walk_forward_evaluation(frame, self._cfg())
+        self.assertEqual(len(result["folds"]), backtest.EVAL_FOLDS)
 
-    def test_purged_fold_boundaries_are_disjoint(self):
-        folds = backtest.build_purged_walk_forward_folds(600, 120)
-        self.assertEqual(len(folds), 3)
-        for fold in folds:
-            train = set(range(fold["train_start"], fold["train_end"]))
-            purge = set(range(fold["purge_start"], fold["purge_end"]))
-            test = set(range(fold["test_start"], fold["test_end"]))
+        n = len(frame)
+        spans = []
+        for fold_index in range(backtest.EVAL_FOLDS):
+            test_end = n - fold_index * backtest.EVAL_TEST_ROWS
+            test_start = test_end - backtest.EVAL_TEST_ROWS
+            train_end = test_start - backtest.CALIBRATION_PURGE_ROWS
+            train_start = max(0, train_end - self._cfg()["ROLLING_WINDOW_DAYS"])
+            train = set(range(train_start, train_end))
+            purge = set(range(train_end, test_start))
+            test = set(range(test_start, test_end))
             self.assertTrue(train.isdisjoint(purge))
             self.assertTrue(train.isdisjoint(test))
             self.assertTrue(purge.isdisjoint(test))
-            self.assertEqual(fold["purge_end"] - fold["purge_start"], 1)
+            self.assertEqual(len(purge), backtest.CALIBRATION_PURGE_ROWS)
+            spans.append((test_start, test_end))
+        # Test blocks tile the recent history without overlapping each other.
+        for (a_start, a_end), (b_start, b_end) in zip(spans, spans[1:]):
+            self.assertEqual(b_end, a_start)
 
     def test_live_calibration_is_idempotent_for_identical_history(self):
         source_hash = "c" * 64
         current = {
             "CALIBRATION_EFFECTIVE_SESSION": "2026-07-21",
             "CALIBRATION_SOURCE_HISTORY_HASH": source_hash,
+            "CALIBRATION_METHOD_VERSION": backtest.CALIBRATION_METHOD_VERSION,
         }
         self.assertTrue(backtest.calibration_is_current(
-            current, source_hash, "2026-07-21", "2026-07-20"
-        ))
+            current, source_hash, "2026-07-21", "2026-07-20"))
         self.assertFalse(backtest.calibration_is_current(
-            current, "d" * 64, "2026-07-21", "2026-07-20"
-        ))
+            current, "d" * 64, "2026-07-21", "2026-07-20"))
         self.assertFalse(backtest.calibration_is_current(
-            current, source_hash, "2026-07-22", "2026-07-21"
-        ))
+            current, source_hash, "2026-07-22", "2026-07-21"))
 
-    def test_legacy_cache_migrates_without_reapplying_smoothing(self):
-        old_style = {"CALIBRATION_EFFECTIVE_SESSION": "2026-07-20"}
-        self.assertTrue(backtest.calibration_is_current(
-            old_style, "e" * 64, "2026-07-21", "2026-07-20"
-        ))
+    def test_method_change_forces_recalibration(self):
+        """A cache from a superseded engine must never be served as current."""
+        stale = {
+            "CALIBRATION_EFFECTIVE_SESSION": "2026-07-21",
+            "CALIBRATION_SOURCE_HISTORY_HASH": "c" * 64,
+            "CALIBRATION_METHOD_VERSION": "v1-purged-three-fold",
+        }
+        self.assertFalse(backtest.calibration_is_current(
+            stale, "c" * 64, "2026-07-21", "2026-07-20"))
 
     def test_metrics_cache_records_next_session_and_source_hash(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.object(
@@ -497,32 +543,65 @@ class TestPointInTimeCalibrationArtifacts(unittest.TestCase):
                 saved = json.load(handle)
         self.assertEqual(saved["CALIBRATION_EFFECTIVE_SESSION"], "2026-07-21")
         self.assertEqual(saved["CALIBRATION_SOURCE_HISTORY_HASH"], "f" * 64)
+        self.assertEqual(saved["CALIBRATION_METHOD_VERSION"],
+                         backtest.CALIBRATION_METHOD_VERSION)
+
+    def test_metrics_cache_drops_superseded_keys(self):
+        """Stale in-sample statistics must not survive in the live cache."""
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            backtest, "METRICS_CACHE_PATH", os.path.join(temp_dir, "metrics.json")
+        ):
+            backtest.save_metrics_cache({
+                "RB_HIKE_THRESHOLD_CENTS": 1.85,
+                "RB_historical_win_rate": 0.9436,
+                "RB_average_savings": 5.1889,
+                "RB_high_z_win_rate": 0.83,
+                "RB_opt_Hp": 20,
+            }, effective_session="2026-07-21", source_history_hash="a" * 64)
+            with open(backtest.METRICS_CACHE_PATH, "r", encoding="utf-8") as handle:
+                saved = json.load(handle)
+        self.assertIn("RB_HIKE_THRESHOLD_CENTS", saved)
+        for dropped in ("RB_historical_win_rate", "RB_average_savings",
+                        "RB_high_z_win_rate", "RB_opt_Hp"):
+            self.assertNotIn(dropped, saved)
 
     def test_calibration_effective_session_skips_holidays_and_weekends(self):
-        self.assertEqual(
-            backtest._next_nymex_business_session("2026-07-02"), "2026-07-06"
-        )
-        self.assertEqual(
-            backtest._next_nymex_business_session("2026-07-17"), "2026-07-20"
-        )
+        self.assertEqual(backtest._next_nymex_business_session("2026-07-02"), "2026-07-06")
+        self.assertEqual(backtest._next_nymex_business_session("2026-07-17"), "2026-07-20")
 
     def test_future_rows_cannot_change_artifact_training_or_calibration(self):
         history = self._history()
-        kwargs = self._small_grid()
-        effective_session = history.loc[450, "date"].date().isoformat()
+        effective_session = history.loc[400, "date"].date().isoformat()
         first = backtest.build_shadow_calibration_artifact(
-            history, self._cfg(), effective_session=effective_session, **kwargs
-        )
+            history, self._cfg(), effective_session=effective_session)
         mutated = history.copy()
         # These rows are after the decision session and must not influence it.
-        mutated.loc[451:, ["nymex_rb", "nymex_ho", "rack_u", "rack_d"]] = 9.99
+        mutated.loc[401:, ["nymex_rb", "nymex_ho", "rack_u", "rack_d"]] = 9.99
         second = backtest.build_shadow_calibration_artifact(
-            mutated, self._cfg(), effective_session=effective_session, **kwargs
-        )
+            mutated, self._cfg(), effective_session=effective_session)
         self.assertEqual(first["training_end"], second["training_end"])
         self.assertEqual(first["source_history_hash"], second["source_history_hash"])
         self.assertEqual(first["calibration"], second["calibration"])
         self.assertEqual(first["artifact_id"], second["artifact_id"])
+
+    def test_artifact_calibration_does_not_depend_on_the_live_cache(self):
+        """The artifact must be a function of history and policy only.
+
+        The engine no longer blends the previous threshold into the new one, so
+        a corrupted live cache cannot leak into the point-in-time record.
+        """
+        history = self._history()
+        session = history.loc[400, "date"].date().isoformat()
+        baseline = backtest.build_shadow_calibration_artifact(
+            history, self._cfg(), effective_session=session)
+
+        polluted = self._cfg()
+        polluted["RB_HIKE_THRESHOLD_CENTS"] = 99.0
+        polluted["HO_DROP_THRESHOLD_CENTS"] = -99.0
+        from_polluted = backtest.build_shadow_calibration_artifact(
+            history, polluted, effective_session=session)
+
+        self.assertEqual(baseline["calibration"], from_polluted["calibration"])
 
     def test_artifacts_are_immutable_and_replay_ignores_current_cache(self):
         artifact = {
@@ -546,8 +625,7 @@ class TestPointInTimeCalibrationArtifacts(unittest.TestCase):
             written, created = append_calibration_artifact(path, artifact)
             self.assertTrue(created)
             replayed = replay_day.simulate_thresholds_at_date(
-                pd.DataFrame(), "2026-07-21", artifact_path=path
-            )
+                pd.DataFrame(), "2026-07-21", artifact_path=path)
             self.assertEqual(replayed, written["calibration"])
             conflicting = dict(artifact)
             conflicting["calibration"] = {"RB_HIKE_THRESHOLD_CENTS": 1.80}
@@ -555,116 +633,42 @@ class TestPointInTimeCalibrationArtifacts(unittest.TestCase):
                 append_calibration_artifact(path, conflicting)
             with self.assertRaises(CalibrationArtifactUnavailable):
                 replay_day.simulate_thresholds_at_date(
-                    pd.DataFrame(), "2026-07-22", artifact_path=path
-                )
-
-    def test_smoothing_uses_prior_artifact_not_current_cache(self):
-        history = self._history()
-        kwargs = self._small_grid()
-        prior = backtest.build_shadow_calibration_artifact(
-            history, self._cfg(), effective_session="2026-01-05", **kwargs
-        )
-        changed_cache = self._cfg()
-        changed_cache["RB_HIKE_THRESHOLD_CENTS"] = 99.0
-        changed_cache["HO_DROP_THRESHOLD_CENTS"] = -99.0
-        from_prior = backtest.build_shadow_calibration_artifact(
-            history, changed_cache, effective_session="2026-01-06",
-            prior_artifact=prior, **kwargs
-        )
-        stable_base = self._cfg()
-        expected = backtest.build_shadow_calibration_artifact(
-            history, stable_base, effective_session="2026-01-06",
-            prior_artifact=prior, **kwargs
-        )
-        self.assertEqual(from_prior["prior_artifact_id"], prior["artifact_id"])
-        self.assertEqual(from_prior["calibration"], expected["calibration"])
+                    pd.DataFrame(), "2026-07-22", artifact_path=path)
 
     def test_same_session_shadow_rerun_uses_the_original_prior_state(self):
-        history = self._history(rows=3)
-        _, eligible = backtest._eligible_training_history(history, "2024-01-05")
+        history = self._history()
+        session = backtest._next_nymex_business_session(history["date"].iloc[-1])
+        _, eligible = backtest._eligible_training_history(history, session)
         with tempfile.TemporaryDirectory() as temp_dir, patch.object(
             backtest, "CALIBRATION_RUNS_PATH", os.path.join(temp_dir, "runs.jsonl")
         ), patch.object(backtest, "build_shadow_calibration_artifact") as build:
             artifact = {
                 "artifact_schema_version": 1,
-                "effective_session": "2024-01-05",
-                "training_start": "2024-01-02",
-                "training_end": "2024-01-04",
+                "effective_session": session,
+                "training_start": eligible["date"].iloc[0].date().isoformat(),
+                "training_end": eligible["date"].iloc[-1].date().isoformat(),
                 "purge_rows": 1,
                 "source_history_hash": backtest._history_hash(eligible),
-                "source_row_count": 3,
+                "source_row_count": len(eligible),
                 "candidate_grid_version": "test",
                 "candidate_grid": {"windows": [90]},
                 "objective": "test",
                 "smoothing_input": {"BLEND_ALPHA": 0.3},
                 "prior_artifact_id": "bootstrap_config",
-                "calibration": {"RB_HIKE_THRESHOLD_CENTS": 2.99},
+                "calibration": {"RB_HIKE_THRESHOLD_CENTS": 1.23},
                 "generated_at": "2026-07-20T18:00:00-05:00",
             }
-            build.return_value = artifact
-            _, created = backtest.write_shadow_calibration_artifact(history, self._cfg())
-            self.assertTrue(created)
-            _, created = backtest.write_shadow_calibration_artifact(history, self._cfg())
+            append_calibration_artifact(backtest.CALIBRATION_RUNS_PATH, artifact)
+            written, created = backtest.write_shadow_calibration_artifact(
+                history, self._cfg())
             self.assertFalse(created)
-            self.assertEqual(build.call_args_list[0].kwargs["prior_artifact"], None)
-            self.assertEqual(build.call_count, 1)
+            self.assertEqual(written["calibration"], artifact["calibration"])
+            build.assert_not_called()
 
-    def test_artifact_validator_rejects_broken_chain_and_impossible_dates(self):
-        base = {
-            "artifact_schema_version": 1,
-            "effective_session": "2026-07-21",
-            "training_start": "2026-01-02",
-            "training_end": "2026-07-20",
-            "purge_rows": 1,
-            "source_history_hash": "a" * 64,
-            "source_row_count": 100,
-            "candidate_grid_version": "test",
-            "candidate_grid": {"windows": [90]},
-            "objective": "test",
-            "smoothing_input": {"BLEND_ALPHA": 0.3},
-            "prior_artifact_id": "bootstrap_config",
-            "calibration": {"RB_HIKE_THRESHOLD_CENTS": 2.99},
-            "generated_at": "2026-07-20T20:00:00-05:00",
-        }
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = os.path.join(temp_dir, "runs.jsonl")
-            first, _ = append_calibration_artifact(path, base)
-            broken = dict(base)
-            broken.update({
-                "effective_session": "2026-07-22",
-                "prior_artifact_id": "b" * 64,
-            })
-            with self.assertRaisesRegex(ValueError, "continue the existing chain"):
-                append_calibration_artifact(path, broken)
-            impossible = dict(base)
-            impossible["training_end"] = "2026-07-21"
-            with self.assertRaisesRegex(ValueError, "impossible date boundaries"):
-                append_calibration_artifact(os.path.join(temp_dir, "bad.jsonl"), impossible)
-            self.assertRegex(first["artifact_id"], r"^[0-9a-f]{64}$")
+    def test_calibration_refuses_history_outside_the_verified_era(self):
+        """Legacy rows must not be able to re-enter calibration."""
+        legacy = self._history()
+        legacy["date"] = pd.date_range("2023-03-07", periods=len(legacy), freq="B")
+        with self.assertRaises(ValueError):
+            backtest._eligible_training_history(legacy, None)
 
-    def test_schema_v1_artifact_remains_replayable_after_v2_upgrade(self):
-        legacy = {
-            "artifact_schema_version": 1,
-            "effective_session": "2026-07-21",
-            "training_start": "2026-01-02",
-            "training_end": "2026-07-20",
-            "purge_rows": 1,
-            "source_history_hash": "a" * 64,
-            "source_row_count": 100,
-            "candidate_grid_version": "v1-purged-three-fold",
-            "objective": "median_out_of_sample_savings_cents",
-            "prior_artifact_id": "bootstrap_config",
-            "calibration": {"RB_HIKE_THRESHOLD_CENTS": 2.99},
-            "generated_at": "2026-07-20T20:00:00-05:00",
-        }
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = os.path.join(temp_dir, "runs.jsonl")
-            written, _ = append_calibration_artifact(path, legacy)
-            replayed = replay_day.simulate_thresholds_at_date(
-                pd.DataFrame(), "2026-07-21", artifact_path=path
-            )
-        self.assertEqual(replayed, written["calibration"])
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -1,124 +1,241 @@
 ## Oil Pricing Risk Engine
 
-An institutional-grade, fully automated wholesale fuel purchasing predictor built specifically for independent gas stations and bulk fuel buyers to optimize physical inventory procurement.
-
-This system acts as a headless, serverless data pipeline and machine learning engine. It mathematically correlates the physical supplier rack prices (Graves Oil Company) with the NYMEX commodity futures market to predict whether wholesale gasoline and diesel prices will rise or fall tomorrow, allowing you to buy before hikes and wait before drops.
+An automated wholesale fuel purchasing aid for independent gas stations and bulk
+fuel buyers. It reads the supplier's nightly rack email, compares it against the
+NYMEX settle, and tells you whether tonight's rack price is likely to rise or
+fall — so you can lift before a hike or defer before a drop.
 
 ---
 
-## Model Performance & Historical Edge
+## What the edge actually is
 
-Wholesale physical rack pricing is synchronous with futures: Graves Oil sets its rack price at 6:00 PM based on that day's 1:30 PM NYMEX settle. Since the buyer's purchase deadline at the previous day's price is midnight, this creates a physical arbitrage window. The buyer uses NYMEX settlements to predict the upcoming Graves price change, allowing them to order fuel at the old price.
+Graves Oil prices its rack off the 1:30 PM CT NYMEX settle and posts it that
+evening. The daily rack change is therefore close to an affine function of the
+daily settle change:
 
-An out-of-sample quantitative audit across three distinct market regimes (2023–2026) reveals the following historical performance envelopes:
+```
+rack_delta = a + b * nymex_delta + noise
+```
 
-### 1. Multi-Year Precision & Savings Baseline
+with a fitted slope of **0.69 for gasoline** and **0.98 for diesel**. That is a
+pricing formula, not a forecast. The system is not predicting the market; it is
+reading a settle that is already public at 2:35 PM and inferring a rack price
+that is not posted until the evening.
 
-The primary metric of the engine's edge is **expected net savings in cents per gallon (¢/gal)**. Dollar savings are presented as worked examples assuming a single standard 8,500-gallon capacity delivery truck per active alert day.
+**The whole value therefore rests on one operational question: can you actually
+transact at the prior day's rack after 2:35 PM?** If your supplier will not fill
+an order at yesterday's price once the new settle is known, the statistical edge
+is worth nothing. Confirm that against your own Bills of Lading before acting on
+this tool.
 
-*   **Unleaded Gasoline (RBOB):**
-    *   **Honest Multi-Year Precision Envelope:** **53%–73%** (with an overall historical average of **71.0%** and an average savings of **+6.04¢/gal** per active alert).
-    *   **Conservative Floor for Planning:** **53.0%** precision.
-    *   **Yearly Out-of-Sample Performance Breakdown (Unleaded):**
-        *   **2023 (Moderate Volatility):** 34 alerts | 52.94% precision | **+29.96¢/gal** net savings | **$2,546.60** annual savings.
-        *   **2024 (Low-to-Moderate Volatility):** 146 alerts | 54.11% precision | **+61.31¢/gal** net savings | **$5,211.35** annual savings.
-        *   **2025 (High Volatility/Low Noise):** 158 alerts | 72.78% precision | **+217.06¢/gal** net savings | **$18,450.10** annual savings.
-        *   **Recent Out-of-Sample Window (Late 2025 into 2026):** 80 alerts in 90 days | 96.25% precision | **+542.03¢/gal** savings | **$46,072.55** OOS savings.
+Two consequences worth stating plainly:
 
-*   **Diesel / Heating Oil (HO):**
-    *   **Honest Multi-Year Precision Envelope:** **60%–79%** (with an overall historical average of **94.8%** and an average savings of **+9.97¢/gal** per active alert).
-    *   **Conservative Floor for Planning:** **60.0%** precision.
-    *   **Yearly Out-of-Sample Performance Breakdown (Diesel):**
-        *   **2024:** 84 alerts | 59.52% precision | **+69.41¢/gal** net savings | **$5,900.00** annual savings.
-        *   **2025:** 178 alerts | 78.65% precision | **+492.13¢/gal** net savings | **$41,831.05** annual savings.
+- On the days it fires, the model agrees with simply following the sign of the
+  NYMEX move. The threshold's contribution is **selectivity** — declining the
+  small moves where the rack's own noise dominates — not a cleverer direction
+  call.
+- The measured hit rate comes from an unusually volatile period. It is an upper
+  bound, not a forecast. See the regime table below.
 
-### 2. Payoff Asymmetry & Rockets-and-Feathers Edge
+---
 
-The model's durability across low-precision years (such as 2023 and 2024 at ~53%–59% precision) is driven by **Rockets and Feathers** asymmetric pass-through pricing. Wholesale suppliers raise prices rapidly in response to NYMEX hikes ("rockets") but lower them gradually in response to drops ("feathers"). 
+## Model Performance
 
-Consequently, the engine's correct alerts capture large moves, while incorrect alerts incur smaller costs. This results in a structurally profitable **Win-to-Loss ratio of 1.06x to 1.50x**:
-*   **RBOB (Gasoline) Asymmetry:** Win: 2.75¢ - 5.11¢/gal | Loss: 2.30¢ - 3.87¢/gal (Ratio: 1.17x - 1.32x)
-*   **HO (Diesel) Asymmetry:** Win: 3.90¢ - 4.29¢/gal | Loss: 2.87¢ - 3.69¢/gal (Ratio: 1.06x - 1.50x)
+<!-- BEGIN GENERATED PERFORMANCE -->
 
-> [!CAUTION]
-> **Volatility Warning:** If the 2025 precision increase is primarily a result of calm markets rather than model improvement, a return of high-volatility spikes in 2026 could cause performance to revert to the conservative planning floor of **53% (RB)** / **60% (HO)**. Decisions like storage capacity investment should always be stress-tested at the 53% / 60% floors, not the recent 96% regime levels.
+> Generated by `python3 generate_readme_stats.py`. Do not edit by hand.
+> Verified history: **266 sessions**, 2025-08-04 to 2026-09-16.
+
+### Measured performance
+
+Expanding-origin out-of-sample: the model is fitted only on sessions before each scored block, and no parameter is selected by comparing blocks. Intervals are 95%.
+
+| | Alerts | Precision | ¢/alert (mean) | ¢/alert (median) | Avg win | Avg loss |
+|---|---|---|---|---|---|---|
+| Unleaded gasoline (RBOB) | 99 | 96.0% (90%–98%) | +6.93 (+5.97 to +7.94) | +5.77 | 7.25¢ | 0.61¢ |
+| Diesel / heating oil (HO) | 108 | 97.2% (92%–99%) | +13.14 (+11.12 to +15.35) | +9.90 | 13.55¢ | 1.81¢ |
+
+Scored window: 2026-03-16 to 2026-09-16.
+
+### What one alert is worth
+
+Per-gallon, on the volume you actually shift that day. A full 8,500-gallon load is shown for scale only — it is **not** a claim that you lift a full truck on every alert.
+
+| | ¢/gal per alert | $ per 8,500-gal load | $ per 1,000 gal |
+|---|---|---|---|
+| Unleaded gasoline (RBOB) | +6.93¢ | $589 | $69 |
+| Diesel / heating oil (HO) | +13.14¢ | $1,117 | $131 |
+
+Multiply by the loads you genuinely reschedule. Summing every alert and multiplying by a full truck implies buying ahead on ~300 days a year, which needs storage no single site has.
+
+### Regime dependence
+
+Splitting the verified history at its median absolute NYMEX move:
+
+| | Calm sessions | Volatile sessions |
+|---|---|---|
+| Unleaded gasoline (RBOB) | 59 alerts, 93%, +2.06¢/alert | 119 alerts, 96%, +6.87¢/alert |
+| Diesel / heating oil (HO) | 91 alerts, 91%, +2.85¢/alert | 119 alerts, 100%, +14.68¢/alert |
+
+**Read this before trusting the headline.** The verified history is dominated by an exceptionally volatile stretch. Precision is *higher* when moves are large, because the pass-through signal grows relative to the rack's fixed noise floor — so a return to calm markets lowers both the hit rate and the cents per alert. Size any storage or capital decision on the calm column.
+
+### Fitted pass-through
+
+| | Slope | Intercept | R² | Residual σ | Sessions |
+|---|---|---|---|---|---|
+| Unleaded gasoline (RBOB) | 0.692 | +0.013¢ | 0.776 | 2.97¢ | 239 |
+| Diesel / heating oil (HO) | 0.978 | -0.036¢ | 0.935 | 3.32¢ | 239 |
+
+Alignment check: RB lag-1 coefficient -0.015 (p=0.56, 2% of same-session); HO lag-1 coefficient -0.008 (p=0.64, 1% of same-session).
+
+<!-- END GENERATED PERFORMANCE -->
+
+### How to read a verdict
+
+Each alert quotes a **calibrated probability for that specific move**, not a
+band. "82% confidence the rack will rise tonight" means that among past signals
+the model scored at 82%, close to 82% did rise — verified out of sample in
+`test_model.py::test_quoted_probabilities_match_realised_frequencies`.
+
+WAIT alerts also carry the deferral risk: how often the rack rose anyway, the
+median WAIT-day move, and the average of the worst 5% **with its sample size and
+confidence interval**. The tail is estimated from a handful of observations and
+the alert says so.
+
+---
+
+## Data integrity: the one thing you must know
+
+`data/graves_history.csv` contains two incompatible date conventions.
+
+Rows written by the live ingest are stamped with the session date. Rows from the
+original bulk email import were stamped from the email `Date:` header **without
+converting it to America/Chicago** — an 8 PM CT email carries a UTC timestamp of
+01:00 the next day, so those rows landed one session late and their rack price
+was joined to the *following* day's settle. The fingerprint is still visible:
+2023 has 42 Saturday rows and zero Monday rows.
+
+The importer is fixed, but the historical rows cannot be repaired: under the
+legacy stamping no row was ever stamped Monday, so Monday settles were never
+backfilled. **Calibration therefore uses only sessions from
+`alignment.CALIBRATION_ERA_START` onward**, and `backtest.py` refuses to run if
+the verified window ever fails the alignment test. See
+`docs/history-alignment.md`.
+
+This is why the performance figures above cover ~1 year rather than ~3.
 
 ---
 
 ## Core Features
 
-- **Hourly Ingestion Retries (`ingest_prices.py`)**: Nightly connects via IMAP to read the official supplier invoice. It queries hourly from 8:00 PM to 12:00 AM CT with exponential backoff to prevent false missing-email alarms, handles target date calculations across the midnight boundary, and appends parsed rack prices to an immutable CSV history.
-- **Walk-Forward Calibration (`backtest.py`)**: Re-engineers threshold calibration using a robust 3-fold Walk-Forward Validation strategy over the last 365 days of history (90-day out-of-sample test windows). The parameter grid search sweeps training windows $W \in \{120, 180, 240\}$, hike percentiles $Hp \in \{15, 20\}$, and drop percentiles $Dp \in \{80, 85\}$ to maximize **median out-of-sample savings** to prevent backtest overfitting. Statically configured clamping bounds (e.g., `CLAMP_HIKE_MIN: 0.3`, `CLAMP_HIKE_MAX: 3.0` cents, and `CLAMP_DROP_MIN: -3.0`, `CLAMP_DROP_MAX: -0.3` cents) act as emergency guardrails, overriding the percentiles if market volatility collapses or explodes.
-- **Contract Roll Day Exclusions**: Excludes anomalous futures price data surrounding CME contract roll days (the 25th of the month, or nearest business day) from both calibration and active trading to prevent false signaling during mechanical liquidity shifts.
-- **Dynamic Volatility & Z-Score Conviction**: Evaluates the strength of futures moves using the rolling standard deviation of daily changes ($\sigma$). It translates daily changes into Z-scores to grade alerts by conviction: **High Conviction** ($|Z| \ge 1.5$), **Moderate Conviction** ($1.0 \le |Z| < 1.5$), or **Low Conviction** ($|Z| < 1.0$). Z-score thresholds are smoothed for historical reproducibility.
-- **Quantified Deferral Risk (CVaR)**: Computes the 95% Conditional Value-at-Risk (worst-case tail risk) over the optimal window. For "WAIT" alerts, it computes the expected price spike cost:
-  *e.g., "Risk Note: On the worst 5% of days historically, rack prices spiked +4.20¢/gal (+$357 per 8,500 gal truck)."*
-- **Real-Time SMS & Email Alerts**: Polls the Schwab API and Yahoo Finance API (`RB=F`, `HO=F`, `CL=F`) during CME trading hours. At 2:35 PM CT (post-NYMEX settlement), it sends structured, high-value alerts containing the verdict, Z-score conviction, and tail-risk warnings. It also displays a standard **3:2:1 Crack Spread** priced per barrel of crude: `(2 * RB * 42 + 1 * HO * 42 - 3 * CL) / 3 = 28 * RB + 14 * HO - CL`.
-- **Overnight Verification Loop**: Automatically backfills prediction outcomes by comparing them to the next trading day's physical rack price, appending results to `prediction_log.csv` and displaying the confirmation table in morning notifications.
-- **Outlook-Safe Weekly Dashboard (`weekly_report.py`)**: Runs every Saturday morning. It calculates cumulative savings, runs a stable 180-day permutation significance test, and formats the dashboard using nested HTML tables for rendering safety.
-- **Blockchain-Style Data Validation (`validate_data.py`)**: Protects the database against corruption and manual edits using an append-only registry of SHA-256 hashes (`data/integrity_hashes.csv`), enforcing strict immutability.
+- **Nightly ingestion (`ingest_prices.py`)** — reads the supplier invoice over
+  IMAP hourly through the evening with backoff, handles the midnight boundary,
+  and appends parsed rack prices to an append-only CSV.
+- **Pass-through calibration (`backtest.py`)** — fits `rack ~ nymex` on
+  alignment-verified, roll-free sessions; places thresholds where the win
+  probability reaches `TARGET_SIGNAL_CONFIDENCE` (0.75) under the *empirical*
+  residual distribution; floors them at the measured live snapshot error. A
+  purged walk-forward runs alongside purely as an out-of-sample *measurement* —
+  no parameter is selected from it.
+- **Snapshot noise floor** — the 2:35 PM snapshot differs from the official
+  settle with a robust σ of ~0.5¢ (95th percentile ~1.2¢). Thresholds are
+  floored at that, so an alert cannot be triggered by measurement error.
+- **Contract roll exclusion** — sessions where the front month changes are
+  excluded from calibration and suppressed live. RB and HO expire on the **last
+  business day of the preceding month**; the quoted contract switches
+  `DEFAULT_EARLY_ROLL_DAYS` business days earlier, a value calibrated against
+  observed settle gaps rather than assumed.
+- **Calibrated confidence** — every alert carries a per-signal probability from
+  the fitted residual distribution, replacing Z-score conviction bins whose
+  differences were not statistically significant for RB (high vs low p = 0.37).
+- **Quantified deferral risk** — 95% CVaR on WAIT signals with a bootstrap
+  interval and an explicit tail count, reported next to the far better estimated
+  P(adverse) and median WAIT-day move.
+- **Real-time SMS & email alerts** — polls Schwab and Yahoo Finance during CME
+  hours and sends the verdict at 2:35 PM CT. Also shows the 3:2:1 crack spread
+  per barrel of crude: `(2·RB·42 + 1·HO·42 − 3·CL)/3 = 28·RB + 14·HO − CL`.
+- **Overnight verification** — backfills outcomes from the next rack posting.
+  An outcome is only scored when the preceding session is present in the
+  history, so a failed ingest cannot turn a two-session move into a one-session
+  score.
+- **Weekly dashboard (`weekly_report.py`)** — cumulative savings, a date-block
+  permutation test that keeps RB/HO paired within a session, and a basis-drift
+  monitor using the Hamed-Rao autocorrelation correction.
+- **Append-only integrity registry (`validate_data.py`)** — SHA-256 over every
+  data file. Numeric fields are canonicalised so benign reformatting does not
+  trip it, and any edit to a historical row now fails the run.
+
+---
+
+## Operational Safeguards
+
+1. **No model, no verdict.** If `metrics_cache.json` has no fitted pass-through,
+   alerts are suppressed rather than falling back to default thresholds.
+2. **Alignment gate.** Calibration aborts if the verified window shows a lag-1
+   pass-through, or if the file starts mixing stamping conventions again.
+3. **Settlement-only performance.** Verdicts computed from a live price proxy
+   outside the settlement window are logged but excluded from every performance
+   figure.
+4. **$1.00 daily jump / $1.00–$10.00 range.** Gross data-entry guards. Note the
+   ingest parser separately enforces $1.50–$6.00 and diesel has already reached
+   $5.47, so that ceiling needs raising before the next major rally.
 
 ---
 
 ## System Architecture
 
-1. **Serverless Execution on GitHub Actions**: 100% serverless data pipeline powered by GitHub Actions. Workflows use shared concurrency groups (e.g. `rbob-tracker`) to enforce queueing and prevent `git push` collision errors during parallel operations.
-2. **Workflow Topography**: 
-   - **Real-Time Tracker (`tracker.yml`)**: Runs every 5 minutes during CME Globex hours to monitor futures and send alerts.
-   - **Nightly Ingestion & Backtest (`backtest_ingest.yml`)**: Checks hourly from 8:00 PM to 12:00 AM CT to pull invoices, validate hashes, run walk-forward calibration, and update caches.
-   - **Weekly Dashboard (`weekly_report.yml`)**: Generates reports and analytics every Saturday.
-   - **CI & Health (`ci.yml`, `heartbeat.yml`, `keepalive.yml`)**: Automated testing, system health notifications, and repository activity maintenance.
-3. **Configuration & Data State Storage**: 
-   - **`config.json`**: Read-only, statically schema-checked configuration file for core engine variables. Note that under your load-time price lock contract, you pay the price when fuel is physically loaded, not when ordered. To reflect this, personalize `"DISPATCH_SAME_DAY_RATE"` (defaults to `0.50` as a conservative starting point). This is the single most important number to calibrate from your own Bills of Lading before trusting savings estimates in the system.
-   - **`metrics_cache.json`**: Dynamically written, ephemeral state cache storing walk-forward thresholds and daily validation metrics without dirtying the static configuration.
-   - **`data/*.csv`**: Lightweight, flat-file databases synced directly to the git branch.
-
-
----
-
-## Setup Instructions
-
-To deploy this securely to your own private repository:
-
-1. **Fork the Repository**
-2. **Configure GitHub Secrets**: Go to **Settings > Secrets and variables > Actions** and add:
-   - `GRAVES_EMAIL`: Your corporate Gmail address receiving the Graves invoices.
-   - `GRAVES_APP_PASSWORD`: The 16-character Google App Password for that account.
-   - `GMAIL_USER`: The email address the bot uses to send the SMS text emails.
-   - `GMAIL_APP_PASSWORD`: The Google App Password for the sending account.
-   - `TO_EMAIL`: The destination SMS gateway (e.g., `1234567890@vtext.com` for Verizon).
-   - `PHONE_SMS_ADDRESS`: Optional comma-separated SMS gateway addresses (falls back to `TO_EMAIL` if empty).
-3. **Timezone Verification**: The pipeline strictly relies on the `America/Chicago` timezone for trading hours, execution windows, and date boundaries. 
-
-### Refreshing the Schwab OAuth Token
-
-Run `python3 handshake.py` from the repository. The first run asks for the Schwab app key, app secret, and redirect URI once, then saves only those three values in your macOS Keychain. Future runs load them automatically, so you only authorize in the browser and paste the redirected URL. A successful exchange updates `SCHWAB_REFRESH_TOKEN` in this repository's GitHub Actions secrets automatically through your authenticated GitHub CLI; the token is supplied through standard input and is not printed. Use `python3 handshake.py --configure` to replace saved values or `python3 handshake.py --forget-credentials` to delete them.
+1. **Serverless on GitHub Actions.** Workflows share a `rbob-tracker` concurrency
+   group to prevent push collisions.
+2. **Workflows**
+   - `tracker.yml` — every 5 minutes during Globex hours; sends alerts.
+   - `backtest_ingest.yml` — hourly through the evening (UTC 0–6, which covers
+     the CT window under both CST and CDT) plus a morning retry.
+   - `weekly_report.yml` — Saturday dashboard.
+   - `ci.yml` — test suite on every push.
+3. **State**
+   - `config.json` — static policy. `DISPATCH_SAME_DAY_RATE` (default 0.50) is
+     the fraction of alerts you actually act on; calibrate it from your own
+     Bills of Lading before trusting any dollar figure.
+   - `metrics_cache.json` — fitted model, thresholds and out-of-sample metrics.
+   - `calibration_runs.jsonl` — hash-chained, append-only point-in-time
+     calibration ledger.
 
 ---
 
-## Testing & Verification
+## Setup
 
-The repository contains a highly thorough, multi-tiered testing framework:
+1. Fork the repository.
+2. Add GitHub Secrets: `GRAVES_EMAIL`, `GRAVES_APP_PASSWORD`, `GMAIL_USER`,
+   `GMAIL_APP_PASSWORD`, `TO_EMAIL`, optionally `PHONE_SMS_ADDRESS`.
+3. The pipeline relies on `America/Chicago` throughout.
 
-1. **Comprehensive Test Suite (`comprehensive_test_suite.py`)**: 
-   - A unit-test suite with **54 tests** covering all core categories (email parsing, bounds checks, timezone boundaries, lag math, threshold clamping, CVaR calculations, etc.).
-2. **Deterministic Day Replay (`replay_day.py`)**:
-   - Performs a stateful point-in-time prediction audit on historically logged days to guarantee the system is deterministic, timezone-stable, and free of future-data leakages.
-3. **Statistical Validation & Shadow Benchmarks (`verify_statistics.py`)**:
-   - Audits model significance against randomized null models (permutation test), evaluates out-of-sample holdout datasets, computes yearly regime shifts, analyzes residual diagnostics, and measures model performance against shadow baselines.
-4. **Empirical Audits & Stress Testing (`scratch/`)**:
-   - A suite of specialized tools (`conviction_regime_audit.py`, `weekday_performance_audit.py`, `run_simulations.py`, etc.) for identifying boundary conditions, decay curves, weekday characteristics, and risk structures.
+### Refreshing the Schwab OAuth token
+
+Run `python3 handshake.py`. The first run asks for the app key, secret and
+redirect URI once and stores them in the macOS Keychain. A successful exchange
+updates `SCHWAB_REFRESH_TOKEN` via the GitHub CLI without printing it. Use
+`--configure` to replace saved values or `--forget-credentials` to delete them.
 
 ---
 
-## Operational Constraints & Safeguards
+## Verification
 
-To maintain pipeline stability and catch gross external data entry errors, the system enforces the following constraints:
-1. **$1.00 Daily Price Jump Safeguard**: In `validate_data.py`, physical and settlement price inputs are rejected if they jump by more than $1.00/gal (100 cents/gal) in a single daily transition. In the event of a genuine black swan market shift exceeding this limit, the pipeline will halt as a safety check, requiring administrative override or verification.
-2. **$1.00 to $10.00 Price Boundaries**: Absolute price inputs are validated to reside strictly within a [$1.00, $10.00] range.
+```bash
+python3 -m pytest -q              # full suite
+python3 alignment.py              # alignment report
+python3 alignment.py --scan       # re-derive the era boundary
+python3 verify_statistics.py      # validation suite (exits non-zero on failure)
+python3 replay_day.py --date ...  # point-in-time replay of a logged decision
+python3 generate_readme_stats.py --check   # fail if this README has drifted
+```
+
+`verify_statistics.py` is seeded and does not write any file unless given
+`--chart`. Every check in it can fail; four checks in the previous version could
+not (they compared against quantities that were zero by construction).
 
 ---
 
 ## Disclaimer
 
-This software is a decision-support tool built for informational purposes only. It does not constitute financial advice. The maintainers are not responsible for fuel purchasing decisions, inventory stockouts, or financial losses resulting from the use of this tool.
+Decision-support only, not financial advice. The maintainers are not responsible
+for purchasing decisions, stockouts, or losses arising from use of this tool.

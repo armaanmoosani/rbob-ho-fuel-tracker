@@ -1,6 +1,7 @@
 import os
 import sys
 import pandas as pd
+import csv
 import hashlib
 import json
 import re
@@ -286,20 +287,49 @@ def validate_prediction_log(log_path):
         print(f"Data validation failed: Invalid contract provenance status(es) in prediction log: {invalid}")
         sys.exit(1)
 
-    captured_labels = {"Low Conviction", "Moderate Conviction", "High Conviction"}
-    valid_conviction_provenance = {"captured", "suppressed", "unknown"}
+    # "captured" rows were written by the Z-score ladder; "passthrough_model_v2"
+    # rows by the calibrated pass-through model.  Both are historical records
+    # and both must stay readable, but only the v2 form is written now.
+    LEGACY_CAPTURED_LABELS = {"Low Conviction", "Moderate Conviction", "High Conviction"}
+    CAPTURED_PROVENANCE = {"captured", "passthrough_model_v2"}
+    valid_conviction_provenance = CAPTURED_PROVENANCE | {"suppressed", "unknown"}
     if not df['conviction_provenance'].isin(valid_conviction_provenance).all():
-        print("Data validation failed: Invalid conviction provenance in prediction log.")
+        invalid = sorted(set(df['conviction_provenance']) - valid_conviction_provenance)
+        print(f"Data validation failed: Invalid conviction provenance in prediction log: {invalid}")
         sys.exit(1)
 
     live_v3 = df[(df['prediction_source'] == 'live') & (df['log_schema_version'].astype(str) == '3')]
     if (live_v3['conviction_provenance'] == 'unknown').any():
         print("Data validation failed: New live row cannot have unknown conviction provenance.")
         sys.exit(1)
-    captured = live_v3[live_v3['conviction_provenance'] == 'captured']
-    if not captured['conviction_label'].isin(captured_labels).all():
+    captured = live_v3[live_v3['conviction_provenance'].isin(CAPTURED_PROVENANCE)]
+
+    legacy_captured = captured[captured['conviction_provenance'] == 'captured']
+    if not legacy_captured['conviction_label'].isin(LEGACY_CAPTURED_LABELS).all():
         print("Data validation failed: Captured live conviction is missing or invalid.")
         sys.exit(1)
+
+    # v2 rows carry the calibrated probability inside the label, so it can be
+    # re-derived and checked rather than taken on trust.
+    for _, row in captured[captured['conviction_provenance'] == 'passthrough_model_v2'].iterrows():
+        label = str(row['conviction_label'])
+        match = re.fullmatch(r"(.+?) \| p=(0\.\d+|1\.0+)", label)
+        if not match:
+            print(f"Data validation failed: v2 conviction label is malformed: {label!r}")
+            sys.exit(1)
+        probability = float(match.group(2))
+        if not 0.0 < probability <= 1.0:
+            print(f"Data validation failed: v2 conviction probability out of range: {probability}")
+            sys.exit(1)
+        expected_text = (
+            f"High confidence ({probability:.0%})" if probability >= 0.90
+            else f"Moderate confidence ({probability:.0%})" if probability >= 0.75
+            else f"Low confidence ({probability:.0%})"
+        )
+        if match.group(1) != expected_text:
+            print("Data validation failed: v2 conviction text does not match its probability "
+                  f"({match.group(1)!r} vs {expected_text!r}).")
+            sys.exit(1)
     if not (captured['contract_provenance_status'] == 'verified').all():
         print("Data validation failed: Captured live signal lacks verified contract provenance.")
         sys.exit(1)
@@ -359,14 +389,17 @@ def validate_prediction_log(log_path):
         if abs(z_score - move / std) > 0.005:
             print("Data validation failed: Captured live Z-score is mathematically inconsistent.")
             sys.exit(1)
-        expected_label = (
-            "High Conviction" if abs(z_score) >= 1.5
-            else "Moderate Conviction" if abs(z_score) >= 1.0
-            else "Low Conviction"
-        )
-        if row['conviction_label'] != expected_label:
-            print("Data validation failed: Captured live conviction label does not match Z-score.")
-            sys.exit(1)
+        # Only legacy rows carry a Z-score-derived label; v2 labels were
+        # already checked against their embedded probability above.
+        if row['conviction_provenance'] == 'captured':
+            expected_label = (
+                "High Conviction" if abs(z_score) >= 1.5
+                else "Moderate Conviction" if abs(z_score) >= 1.0
+                else "Low Conviction"
+            )
+            if row['conviction_label'] != expected_label:
+                print("Data validation failed: Captured live conviction label does not match Z-score.")
+                sys.exit(1)
         if price_move >= hike:
             expected_direction, expected_threshold = "HIKE", hike
         elif price_move <= drop:
@@ -390,7 +423,11 @@ def validate_prediction_log(log_path):
         sys.exit(1)
 
     for idx, val in enumerate(df['actual_next_day_move_cents']):
-        if val == 'PENDING':
+        # NO_PRIOR_SESSION marks an outcome that cannot be attributed to a
+        # single session because the preceding session is absent from the
+        # history.  It is terminal, unlike PENDING, and is excluded from every
+        # performance statistic.
+        if val in ('PENDING', 'NO_PRIOR_SESSION'):
             continue
         try:
             float(val)
@@ -495,6 +532,64 @@ def validate_calibration_artifacts(artifact_path):
         sys.exit(1)
     print("Calibration artifact validation: PASSED")
 
+# Fields of prediction_log.csv that may legitimately change after a row is
+# written.  Everything else is frozen the moment the row lands, so a change to
+# it is tampering and must fail the run.
+#
+# The previous implementation masked only the outcome column and then, on any
+# remaining mismatch, re-recorded the hash with the comment "a same-count hash
+# mismatch here is a format normalization, not tampering".  That accepted any
+# edit to any historical row of the file holding the performance record, so the
+# registry provided no protection at all for it.
+#
+# The real source of benign churn is pandas re-serialisation (2.00 -> 2.0,
+# PENDING -> a resolved number), so the fix is to normalise rather than to
+# surrender: numeric fields are canonicalised and the two mutable columns are
+# blanked.
+MUTABLE_PREDICTION_LOG_COLUMNS = ("actual_next_day_move_cents",)
+_PREDICTION_LOG_HEADER = None
+
+
+def _legacy_prediction_log_line(line):
+    """The superseded masking, kept only to re-baseline an existing registry.
+
+    A registry written before the normalisation above holds hashes of this
+    form.  Verifying against it once proves the file is unmodified, after which
+    the record is rewritten under the stricter scheme.  Without this the
+    upgrade would either fail every run or, worse, silently re-baseline an
+    already-tampered file.
+    """
+    parts = line.split(',')
+    if len(parts) >= 8:
+        parts[7] = "PENDING"
+    return ",".join(parts)
+
+
+def _normalize_prediction_log_line(line):
+    """Canonicalise one CSV line so benign reformatting does not change its hash."""
+    global _PREDICTION_LOG_HEADER
+    parts = next(csv.reader([line])) if line.strip() else []
+    if not parts:
+        return line
+    if parts[0] == "timestamp":
+        _PREDICTION_LOG_HEADER = parts
+        return ",".join(parts)
+
+    header = _PREDICTION_LOG_HEADER
+    normalized = []
+    for index, value in enumerate(parts):
+        column = header[index] if header and index < len(header) else None
+        if column in MUTABLE_PREDICTION_LOG_COLUMNS:
+            normalized.append("")
+            continue
+        try:
+            # Canonical numeric form: 2.00, 2.0 and 2 all hash identically.
+            normalized.append(f"{float(value):.6f}")
+        except (TypeError, ValueError):
+            normalized.append(value)
+    return ",".join(normalized)
+
+
 def validate_and_update_hashes(data_dir):
     hash_csv_path = os.path.join(data_dir, "integrity_hashes.csv")
     files_to_track = ["graves_history.csv", "config.json", "metrics_cache.json", "prediction_log.csv"]
@@ -533,14 +628,7 @@ def validate_and_update_hashes(data_dir):
         actual_line_count = len(lines)
         
         if fname == "prediction_log.csv":
-            # Mask actual_next_day_move_cents (index 7) to avoid hash mismatch when PENDING is resolved
-            masked_lines = []
-            for line in lines:
-                parts = line.split(',')
-                if len(parts) >= 8:
-                    parts[7] = "PENDING"
-                masked_lines.append(",".join(parts))
-            lines_to_hash = masked_lines
+            lines_to_hash = [_normalize_prediction_log_line(line) for line in lines]
         else:
             lines_to_hash = lines
         
@@ -590,21 +678,25 @@ def validate_and_update_hashes(data_dir):
                 computed_sha256 = hashlib.sha256(content_to_hash.encode("utf-8")).hexdigest()
 
                 if computed_sha256 != recorded_sha256:
+                    migrated = False
                     if fname == "prediction_log.csv":
-                        # prediction_log.csv may be re-serialized by pandas (e.g. float
-                        # formatting 20.00 -> 20.0) which changes its hash legitimately.
-                        # The PENDING masking handles backfill changes; a same-count hash
-                        # mismatch here is a format normalization, not tampering.
-                        full_content = "\n".join(lines_to_hash)
-                        full_sha256 = hashlib.sha256(full_content.encode("utf-8")).hexdigest()
-                        new_records.append({
-                            "timestamp": pd.Timestamp.now().isoformat(),
-                            "file_name": fname,
-                            "line_count": actual_line_count,
-                            "sha256": full_sha256
-                        })
-                        print(f"Integrity hash updated for {fname} (format normalization, lines: {actual_line_count})")
-                    else:
+                        legacy = "\n".join(
+                            _legacy_prediction_log_line(line)
+                            for line in lines[:recorded_line_count])
+                        legacy_sha = hashlib.sha256(legacy.encode("utf-8")).hexdigest()
+                        if legacy_sha == recorded_sha256:
+                            # Authentic under the old scheme: re-baseline once.
+                            new_records.append({
+                                "timestamp": pd.Timestamp.now().isoformat(),
+                                "file_name": fname,
+                                "line_count": actual_line_count,
+                                "sha256": hashlib.sha256(
+                                    "\n".join(lines_to_hash).encode("utf-8")).hexdigest(),
+                            })
+                            print(f"Integrity hash re-baselined for {fname} under the "
+                                  f"stricter normalisation (lines: {actual_line_count}).")
+                            migrated = True
+                    if not migrated:
                         print(f"Data integrity violation: Historical content of '{fname}' has been modified! "
                               f"Recorded hash: {recorded_sha256}, Computed hash: {computed_sha256}.")
                         sys.exit(1)

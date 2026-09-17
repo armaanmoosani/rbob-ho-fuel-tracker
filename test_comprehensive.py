@@ -23,8 +23,13 @@ os.environ['TO_EMAIL'] = 'mock_to@example.com'
 os.environ['GRAVES_EMAIL'] = 'mock_graves@example.com'
 os.environ['GRAVES_APP_PASSWORD'] = 'mock_graves_pass'
 
+import inspect
+
 import validate_data
+import alignment
+import model
 import backtest
+import futures_util
 import ingest_prices
 import main
 import weekly_report
@@ -180,30 +185,41 @@ class TestCategory2DatabaseIntegrity(unittest.TestCase):
         self.assertTrue(dt_sat.weekday() in (5, 6))
         self.assertFalse(dt_mon.weekday() in (5, 6))
 
-    def test_2_6_monday_to_friday_diff(self):
-        # Friday (2026-05-15), Monday (2026-05-18), Tuesday (2026-05-19)
+    def test_2_6_friday_to_monday_is_one_session(self):
+        """A Friday->Monday pair is one session, and a missing day is not."""
         df = pd.DataFrame({
-            "date": ["2026-05-15", "2026-05-18", "2026-05-19"],
+            "date": pd.to_datetime(["2026-05-15", "2026-05-18", "2026-05-19"]),
             "nymex_rb": [2.00, 2.10, 2.05],
-            "rack_u": [2.10, 2.20, 2.15]
+            "nymex_ho": [2.00, 2.10, 2.05],
+            "rack_u": [2.10, 2.20, 2.15],
+            "rack_d": [2.10, 2.20, 2.15],
         })
-        # Compute deltas before filtering
-        df['delta_nymex'] = df['nymex_rb'].diff() * 100
-        df['delta_rack'] = df['rack_u'].diff() * 100
+        frame = alignment.aligned_deltas(df, "RB")
+        self.assertEqual(len(frame), 2)
+        self.assertAlmostEqual(frame["delta_nymex"].iloc[0], 10.0)
+        self.assertAlmostEqual(frame["delta_nymex"].iloc[1], -5.0)
+        # session_gap lets a consumer see that the first pair spans a weekend
+        # (3 calendar days) while still being one trading session.
+        self.assertEqual(frame["session_gap"].iloc[0], 3)
+        self.assertEqual(frame["session_gap"].iloc[1], 1)
 
-        # Monday's diff is (2.10 - 2.00) * 100 = 10.0
-        # Tuesday's diff is (2.05 - 2.10) * 100 = -5.0
-        self.assertAlmostEqual(df.loc[1, 'delta_nymex'], 10.0)
-        self.assertAlmostEqual(df.loc[2, 'delta_nymex'], -5.0)
+    def test_2_7_weekend_rows_are_dropped_before_differencing(self):
+        """Legacy Saturday rows must never contribute a pair.
 
-        # Apply get_clean_deltas
-        del_nymex, del_rack = backtest.get_clean_deltas(df, "nymex_rb", "rack_u")
-        
-        # Mondays are NOT dropped anymore: Monday index is 1, Tuesday index is 2. Friday index is 0 (diff is NaN, dropped).
-        self.assertIn(1, del_nymex.index)    # Monday kept
-        self.assertAlmostEqual(del_nymex.loc[1], 10.0)
-        self.assertIn(2, del_nymex.index)    # Tuesday kept
-        self.assertAlmostEqual(del_nymex.loc[2], -5.0)
+        Every legacy Saturday row carries a NaN settle.  If it survived into the
+        frame, the Friday->Tuesday difference would silently become a
+        two-session rack move scored against a one-session NYMEX move.
+        """
+        df = pd.DataFrame({
+            "date": pd.to_datetime(["2026-05-15", "2026-05-16", "2026-05-18"]),
+            "nymex_rb": [2.00, float("nan"), 2.10],
+            "nymex_ho": [2.00, float("nan"), 2.10],
+            "rack_u": [2.10, 2.15, 2.20],
+            "rack_d": [2.10, 2.15, 2.20],
+        })
+        loaded = alignment.load_history_from_frame(df)
+        self.assertEqual(len(loaded), 2)
+        self.assertNotIn(pd.Timestamp("2026-05-16"), set(loaded["date"]))
 
     def test_2_7_corrupt_row_middle_check(self):
         # Insert a corrupt non-numeric value in nymex_rb in the middle of a valid DataFrame
@@ -537,128 +553,164 @@ class TestCategory5SplitOLS(unittest.TestCase):
 
 
 class TestCategory6ThresholdCalculation(unittest.TestCase):
-    """Category 6: Threshold Calculation & Guardrails Tests"""
+    """Category 6: Threshold construction from the pass-through model."""
 
-    def test_6_1_15th_percentile_hike_threshold_math(self):
-        # 100 positive up moves sorted from 1 to 100
-        delta_nymex = pd.Series(np.linspace(1.0, 100.0, 100))
-        # 15th percentile should be at 15%
-        p15 = np.percentile(delta_nymex, 15)
-        self.assertAlmostEqual(p15, 15.85)
+    def _fit(self, slope=0.7, intercept=0.0, noise=2.0, n=400, seed=7):
+        rng = np.random.default_rng(seed)
+        x = rng.normal(0, 8, n)
+        y = intercept + slope * x + rng.normal(0, noise, n)
+        return model.fit_passthrough(x, y)
 
-    def test_6_2_floor_clamping(self):
-        # Threshold below 0.3 clamped to 0.3
-        self.assertEqual(backtest.clamp(0.1, 0.3, 3.0), 0.3)
-        self.assertEqual(backtest.clamp(-0.1, -3.0, -0.3), -0.3)
+    def test_6_1_threshold_delivers_the_requested_confidence(self):
+        """The marginal signal must actually win at the requested rate."""
+        fit = self._fit()
+        for target in (0.65, 0.75, 0.85):
+            hike, drop = fit.threshold_for_confidence(target)
+            self.assertAlmostEqual(float(fit.probability_correct(hike)), target, places=2)
+            self.assertAlmostEqual(float(fit.probability_correct(drop)), target, places=2)
 
-    def test_6_3_ceiling_clamping(self):
-        # Threshold above 3.0 clamped to 3.0
-        self.assertEqual(backtest.clamp(5.0, 0.3, 3.0), 3.0)
-        self.assertEqual(backtest.clamp(-5.0, -3.0, -0.3), -3.0)
+    def test_6_2_higher_confidence_demands_a_larger_move(self):
+        fit = self._fit()
+        loose = fit.threshold_for_confidence(0.65)
+        tight = fit.threshold_for_confidence(0.85)
+        self.assertGreater(tight[0], loose[0])
+        self.assertLess(tight[1], loose[1])
 
-    def test_6_4_exponential_smoothing_blend(self):
-        alpha = 0.3
-        old = 1.5
-        new = 1.0
-        smoothed = alpha * new + (1 - alpha) * old
-        self.assertAlmostEqual(smoothed, 1.35)
+    def test_6_3_thresholds_are_clamped_to_sane_bounds(self):
+        """A weak or razor-sharp fit must not emit an absurd threshold."""
+        # Weak but genuinely positive pass-through: the raw threshold would be
+        # tens of cents, far beyond any real daily move.
+        weak = self._fit(slope=0.05, noise=5.0, n=4000)
+        self.assertGreater(weak.slope, 0)
+        hike, drop = weak.threshold_for_confidence(0.9)
+        self.assertEqual(hike, model.MAX_ABS_THRESHOLD)
+        self.assertEqual(drop, -model.MAX_ABS_THRESHOLD)
+
+        # Near-deterministic pass-through: the raw threshold would round to
+        # zero and every trivial move would become an alert.
+        sharp = self._fit(slope=5.0, noise=0.01)
+        hike, drop = sharp.threshold_for_confidence(0.6)
+        self.assertEqual(hike, model.MIN_ABS_THRESHOLD)
+        self.assertEqual(drop, -model.MIN_ABS_THRESHOLD)
+
+    def test_6_4_noise_floor_cannot_be_undercut(self):
+        """A threshold below the snapshot error would be fired by the error."""
+        hike, drop = model.apply_noise_floor(0.4, -0.4, 1.2)
+        self.assertEqual(hike, 1.2)
+        self.assertEqual(drop, -1.2)
+        # An already-wide threshold is left alone.
+        hike, drop = model.apply_noise_floor(3.0, -2.5, 1.2)
+        self.assertEqual((hike, drop), (3.0, -2.5))
+
+    def test_6_5_inverted_passthrough_is_refused(self):
+        """A negative slope means the relationship has broken, not inverted."""
+        fit = self._fit(slope=-0.7)
+        with self.assertRaises(model.ModelFitError):
+            fit.threshold_for_confidence(0.75)
+
+    def test_6_6_calibration_is_deterministic(self):
+        """Identical inputs must give bit-identical thresholds."""
+        a = self._fit(seed=11).threshold_for_confidence(0.75)
+        b = self._fit(seed=11).threshold_for_confidence(0.75)
+        self.assertEqual(a, b)
 
 
 class TestCategory7WalkForward(unittest.TestCase):
-    """Category 7: Walk-Forward Validation Tests"""
+    """Category 7: Walk-forward evaluation is honest and leakage-free."""
 
-    def test_7_1_no_data_leakage(self):
-        # Setup mock walk-forward dataset
-        total_rows = 300
-        test_size = 90
-        W = 120
-        folds = 3
-        # In fold 0: test window starts at N - (f+1)*90, ends at N - f*90
-        for f in range(folds):
-            test_start = total_rows - (f + 1) * test_size
-            test_end = total_rows - f * test_size if f > 0 else total_rows
-            train_start = max(0, test_start - W)
-            
-            # Assert training finishes before test begins
-            self.assertTrue(train_start < test_start)
-            self.assertTrue(test_start <= test_end)
-            self.assertEqual(test_end - test_start, test_size)
+    def _frame(self, n=400, seed=3):
+        rng = np.random.default_rng(seed)
+        dates = pd.bdate_range("2025-01-01", periods=n)
+        x = rng.normal(0, 8, n)
+        y = 0.7 * x + rng.normal(0, 2, n)
+        return pd.DataFrame({"date": dates, "delta_nymex": x, "delta_rack": y,
+                             "session_gap": 1})
 
-    def test_7_2_walk_forward_roll_day_exclusion(self):
-        # Construct synthetic history
-        W = 10
-        test_size = 90
-        folds = 3
-        total_rows = W + test_size * folds + 1  # one explicit purged session
-        
-        dates = pd.date_range("2026-01-01", periods=total_rows).strftime("%Y-%m-%d").tolist()
+    def _cfg(self, **over):
+        cfg = dict(backtest.DEFAULTS)
+        cfg.update(over)
+        return cfg
+
+    def test_7_1_train_purge_test_blocks_are_ordered_and_disjoint(self):
+        """No training row may sit on or after its own test block."""
+        frame = self._frame()
+        seen = []
+        real_fit = backtest.model.fit_passthrough
+
+        def spy(x, y):
+            seen.append((len(x), float(np.asarray(x)[0]), float(np.asarray(x)[-1])))
+            return real_fit(x, y)
+
+        with patch.object(backtest.model, "fit_passthrough", side_effect=spy):
+            result = backtest.walk_forward_evaluation(frame, self._cfg())
+
+        self.assertEqual(len(result["folds"]), backtest.EVAL_FOLDS)
+        n = len(frame)
+        for fold_index in range(backtest.EVAL_FOLDS):
+            test_end = n - fold_index * backtest.EVAL_TEST_ROWS
+            test_start = test_end - backtest.EVAL_TEST_ROWS
+            train_end = test_start - backtest.CALIBRATION_PURGE_ROWS
+            self.assertGreater(test_start, train_end,
+                               "training must end before the test block begins")
+            self.assertEqual(test_start - train_end, backtest.CALIBRATION_PURGE_ROWS,
+                             "exactly one purged session must separate them")
+
+    def test_7_2_evaluation_refuses_a_geometry_that_does_not_fit(self):
+        """It must raise, not silently fall back to hardcoded thresholds.
+
+        The superseded engine returned a -9999 sentinel here and then reverted
+        to a hardcoded (120, 15, 85), so a configuration too large for the data
+        produced plausible thresholds with no warning anywhere.
+        """
+        tiny = self._frame(n=40)
+        with self.assertRaises(model.ModelFitError):
+            backtest.walk_forward_evaluation(tiny, self._cfg())
+
+    def test_7_3_roll_sessions_are_excluded_from_training_pairs(self):
+        dates = pd.bdate_range("2026-01-01", periods=120)
         df = pd.DataFrame({
             "date": dates,
-            "nymex_rb": [2.0] * total_rows,
-            "rack_u": [2.1] * total_rows
+            "nymex_rb": np.linspace(2.0, 2.5, 120),
+            "nymex_ho": np.linspace(2.0, 2.5, 120),
+            "rack_u": np.linspace(2.1, 2.6, 120),
+            "rack_d": np.linspace(2.1, 2.6, 120),
         })
-        # Let nymex rise at index 189 and 279 (test window last rows of fold 1 and fold 0)
-        df.loc[189:, "nymex_rb"] = 2.5
-        df.loc[189:, "rack_u"] = 2.6
-        
-        df.loc[279:, "nymex_rb"] = 3.0
-        df.loc[279:, "rack_u"] = 3.1
-        
-        # Precompute deltas
-        df['delta_nymex'] = df['nymex_rb'].diff() * 100
-        df['delta_rack'] = df['rack_u'].diff() * 100
-        
-        # 1. Run with is_contract_roll_day returning False for all dates
-        with patch('backtest.is_contract_roll_day', return_value=False):
-            savings_with_roll = backtest.simulate_walk_forward(df, "nymex_rb", "rack_u", W, Hp=15, Dp=85, prefix="RB")
-            
-        # 2. Run with is_contract_roll_day returning True for the specific roll dates
-        roll_dates = {dates[189], dates[279]}
-        def mock_is_roll(dt, prefix):
-            return dt in roll_dates
-            
-        with patch('backtest.is_contract_roll_day', side_effect=mock_is_roll):
-            savings_without_roll = backtest.simulate_walk_forward(df, "nymex_rb", "rack_u", W, Hp=15, Dp=85, prefix="RB")
-            
-        self.assertGreater(savings_with_roll, savings_without_roll)
+        rolls = {dates[10].date(), dates[40].date()}
+        with patch("backtest.is_contract_roll_day",
+                   side_effect=lambda d, p: d in rolls):
+            frame = backtest.training_pairs(df, "RB")
+        kept = {d.date() for d in frame["date"]}
+        self.assertTrue(rolls.isdisjoint(kept))
 
-    def test_7_3_lookahead_bias_prevention(self):
-        W = 120
-        test_size = 90
-        folds = 3
-        total_rows = W + test_size * folds + 1  # one explicit purged session
-        
-        dates = pd.date_range("2026-01-01", periods=total_rows).strftime("%Y-%m-%d").tolist()
-        df = pd.DataFrame({
-            "date": dates,
-            "nymex_rb": np.linspace(2.0, 3.0, total_rows),
-            "rack_u": np.linspace(2.1, 3.1, total_rows)
+    def test_7_4_no_parameter_is_selected_from_the_folds(self):
+        """The evaluation must not be able to change the fitted thresholds.
+
+        This is the structural guarantee that makes the reported out-of-sample
+        figure honest: the previous engine maximised the median fold savings
+        over 64 combinations and then reported those same folds as
+        out-of-sample.
+        """
+        frame = self._frame()
+        cfg = self._cfg()
+
+        # The published thresholds must be reproducible from the final window
+        # alone.  If any fold outcome could influence them, this equality fails.
+        window = cfg["ROLLING_WINDOW_DAYS"]
+        tail = frame.tail(window)
+        direct = model.apply_noise_floor(
+            *model.fit_passthrough(tail["delta_nymex"], tail["delta_rack"])
+            .threshold_for_confidence(cfg["TARGET_SIGNAL_CONFIDENCE"]),
+            cfg["SNAPSHOT_NOISE_FLOOR_CENTS"])
+
+        history = pd.DataFrame({
+            "date": frame["date"],
+            "nymex_rb": 0.0, "nymex_ho": 0.0, "rack_u": 0.0, "rack_d": 0.0,
         })
-        # Precompute deltas
-        df['delta_nymex'] = df['nymex_rb'].diff() * 100
-        df['delta_rack'] = df['rack_u'].diff() * 100
-        
-        captured_train_dfs = []
-        orig_get_clean_deltas = backtest.get_clean_deltas
-        
-        def mock_get_clean_deltas(df_train, nymex_col, rack_col):
-            captured_train_dfs.append(df_train.copy())
-            return orig_get_clean_deltas(df_train, nymex_col, rack_col)
-            
-        with patch('backtest.get_clean_deltas', side_effect=mock_get_clean_deltas):
-            backtest.simulate_walk_forward(df, "nymex_rb", "rack_u", W, Hp=15, Dp=85, prefix="RB")
-            
-        self.assertEqual(len(captured_train_dfs), folds)
-        
-        boundaries = backtest.build_purged_walk_forward_folds(row_count=len(df), window_days=W)
-        for df_train, boundary in zip(captured_train_dfs, boundaries):
-            df_test = df.iloc[boundary['test_start']:boundary['test_end']]
-            df_purge = df.iloc[boundary['purge_start']:boundary['purge_end']]
-            self.assertEqual(len(df_purge), 1)
-            self.assertLess(df_train['date'].max(), df_purge['date'].min())
-            self.assertLess(df_purge['date'].max(), df_test['date'].min())
-            self.assertTrue(set(df_train['date']).isdisjoint(df_test['date']))
-            self.assertTrue(set(df_train['date']).isdisjoint(df_purge['date']))
+        with patch("backtest.training_pairs", return_value=frame):
+            out, _, _ = backtest.calibrate(history, "RB", dict(cfg))
+
+        self.assertAlmostEqual(out["RB_HIKE_THRESHOLD_CENTS"], round(direct[0], 2))
+        self.assertAlmostEqual(out["RB_DROP_THRESHOLD_CENTS"], round(direct[1], 2))
 
 
 class TestCategory8CVaRAndRiskMetrics(unittest.TestCase):
@@ -739,10 +791,12 @@ class TestCategory9AlertLogic(unittest.TestCase):
         self.assertFalse(is_alert)
 
     def test_9_4_threshold_crossover_safety(self):
-        # Verify that crossover or identical boundaries are mutually exclusive
-        # even if hike and drop thresholds are very close or overlap (which clamp prevents).
-        hike = backtest.clamp(0.1, 0.3, 3.0)      # clamped to 0.3
-        drop = backtest.clamp(-0.1, -3.0, -0.3)   # clamped to -0.3
+        # Hike and drop can never meet: the minimum clamp and the noise floor
+        # both keep them strictly on opposite sides of zero.
+        hike, drop = model.apply_noise_floor(
+            model.MIN_ABS_THRESHOLD, -model.MIN_ABS_THRESHOLD, 0.0)
+        self.assertTrue(hike > drop)
+        hike, drop = model.apply_noise_floor(0.05, -0.05, 1.2)
         self.assertTrue(hike > drop)
         
         # Test signal generation exclusivity
@@ -831,36 +885,28 @@ class TestCategory9AlertLogic(unittest.TestCase):
             # Slightly above lean_drop (-0.49c) -> NO_EDGE
             self.assertEqual(get_act(1.9951), "NO_EDGE")
 
-    def test_9_7_run_simulation(self):
-        import verify_statistics
-        # Create a mock df slice with delta_nymex and delta_rack
-        df = pd.DataFrame({
-            'delta_nymex': [1.5, -2.0, 0.5, 2.0, -1.0, 0.0],
-            'delta_rack': [2.0, -1.0, 0.2, -0.5, -0.5, 0.1]
-        })
-        savings, precision, total, per_alert_savings = verify_statistics.run_simulation(
-            df, hike_thresh=1.0, drop_thresh=-1.5, nymex_col='delta_nymex', rack_col='delta_rack'
-        )
-        self.assertAlmostEqual(savings, 2.5)
-        self.assertAlmostEqual(precision, 2.0 / 3.0)
-        self.assertEqual(total, 3)
-        self.assertEqual(per_alert_savings, [2.0, 1.0, -0.5])
+    def test_9_7_savings_accounting(self):
+        """BUY captures the rise, WAIT captures the fall, no-edge days score 0."""
+        nymex = np.array([1.5, -2.0, 0.5, 2.0, -1.0, 0.0])
+        rack = np.array([2.0, -1.0, 0.2, -0.5, -0.5, 0.1])
+        summary = model.summarize(nymex, rack, hike=1.0, drop=-1.5)
+        # Alerts: +1.5 (BUY, +2.0), -2.0 (WAIT, +1.0), +2.0 (BUY, -0.5).
+        self.assertEqual(summary["alerts"], 3)
+        self.assertAlmostEqual(summary["total_savings"], 2.5)
+        self.assertAlmostEqual(summary["precision"], 2.0 / 3.0)
+        self.assertEqual(sorted(summary["payoff"].tolist()), [-0.5, 1.0, 2.0])
 
-    def test_9_8_tune_thresholds(self):
-        import verify_statistics
-        # Create mock df_train (need >= 10 rows to avoid default returns)
-        df = pd.DataFrame({
-            'nymex': [1.0, 1.01, 1.03, 1.06, 1.10, 1.15, 1.21, 1.28, 1.36, 1.45, 1.55, 1.66],
-            'rack':  [2.0, 2.02, 2.05, 2.09, 2.14, 2.20, 2.27, 2.35, 2.44, 2.54, 2.65, 2.77]
-        })
-        hike_thresh, drop_thresh, slope, r2 = verify_statistics.tune_thresholds(
-            df, nymex_col='nymex', rack_col='rack', Hp=15, Dp=85
-        )
-        self.assertTrue(hike_thresh >= 0.3)
-        self.assertEqual(drop_thresh, -1.0)
-        self.assertAlmostEqual(slope, 1.0)
-        self.assertAlmostEqual(r2, 1.0)
-
+    def test_9_8_passthrough_fit_recovers_a_known_relationship(self):
+        """Replaces the percentile tuner with the fit that supersedes it."""
+        rng = np.random.default_rng(13)
+        x = rng.normal(0, 8, 500)
+        y = 1.0 * x + rng.normal(0, 0.5, 500)
+        fit = model.fit_passthrough(x, y)
+        self.assertAlmostEqual(fit.slope, 1.0, places=1)
+        self.assertGreater(fit.r2, 0.99)
+        hike, drop = fit.threshold_for_confidence(0.75)
+        self.assertGreater(hike, 0)
+        self.assertLess(drop, 0)
 
 class TestCategory10HistoricalReplay(unittest.TestCase):
     """Category 10: Historical Replay Tests"""
@@ -935,18 +981,39 @@ class TestCategory10HistoricalReplay(unittest.TestCase):
         self.assertTrue(r_val**2 > 0.10)
         self.assertTrue(p_val < 0.01)
 
-    def test_10_4_full_replay_win_rate_real_data(self):
-        df = pd.read_csv(backtest.CSV_PATH)
-        self.assertTrue(len(df) >= 766)
-        
-        cfg = backtest.load_config()
-        # Run optimization on real data
-        cfg, msg, win = backtest.run_optimization(df, 'nymex_rb', 'rack_u', 'RB', cfg)
-        
-        # Verify parameters are updated and savings metrics are recorded
-        self.assertIn('RB_historical_win_rate', cfg)
-        self.assertTrue(cfg['RB_historical_win_rate'] > 0.50)
-        self.assertTrue(cfg['RB_average_savings'] > 0.0)
+    def test_10_4_full_replay_on_real_data(self):
+        """Calibrate on the real history and check every published figure.
+
+        Note what is asserted: the *out-of-sample* precision, not an in-sample
+        win rate.  The superseded engine wrote ``RB_historical_win_rate``
+        measured on its own training window (it read 0.94) and this test
+        asserted that number was above 0.50, which it could not fail to be.
+        """
+        full = alignment.load_history(backtest.CSV_PATH)
+        df = alignment.calibration_history(full)
+        self.assertGreaterEqual(len(df), 200)
+
+        cfg = dict(backtest.DEFAULTS)
+        cfg, msg, evaluation = backtest.calibrate(df, 'RB', cfg)
+
+        self.assertIn('RB_oos_precision', cfg)
+        self.assertEqual(cfg['RB_oos_alerts'], evaluation['alerts'])
+        self.assertGreater(cfg['RB_oos_alerts'], 30)
+        self.assertGreater(cfg['RB_oos_precision'], 0.50)
+        self.assertLessEqual(cfg['RB_oos_precision'], 1.0)
+        # In-sample figures must be present but distinctly named, so no
+        # consumer can mistake one for the other.
+        self.assertIn('RB_insample_precision', cfg)
+        self.assertNotIn('RB_historical_win_rate', cfg)
+        # The fitted relationship must be economically sensible.
+        self.assertGreater(cfg['RB_pt_slope'], 0.2)
+        self.assertLess(cfg['RB_pt_slope'], 1.5)
+        self.assertGreater(cfg['RB_pt_r2'], 0.3)
+        # Thresholds must clear the measured snapshot noise floor.
+        self.assertGreaterEqual(cfg['RB_HIKE_THRESHOLD_CENTS'],
+                                cfg['SNAPSHOT_NOISE_FLOOR_CENTS'])
+        self.assertLessEqual(cfg['RB_DROP_THRESHOLD_CENTS'],
+                             -cfg['SNAPSHOT_NOISE_FLOOR_CENTS'])
 
     def test_10_5_permutation_pvalue_math(self):
         real_savings = 50.0
@@ -982,48 +1049,60 @@ class TestCategory10HistoricalReplay(unittest.TestCase):
 
 
 class TestCategory11AlertFormatting(unittest.TestCase):
+    """Category 11: verdict text is derived from the model, never hardcoded."""
+
+    @staticmethod
+    def _cache_for(prefix, slope, intercept, sigma, seed):
+        """A realistic fitted model serialised the way the cache stores it."""
+        rng = np.random.default_rng(seed)
+        x = rng.normal(0, 8, 400)
+        y = intercept + slope * x + rng.normal(0, sigma, 400)
+        return model.passthrough_to_config(model.fit_passthrough(x, y), prefix)
+
     def setUp(self):
         import main
         self.orig_main_data_dir = main.DATA_DIR
         self.temp_dir = tempfile.mkdtemp()
-        
-        # Copy config.json to the temp folder so main.py can load it
         orig_config_path = os.path.join(self.orig_main_data_dir, "config.json")
         if os.path.exists(orig_config_path):
             shutil.copy(orig_config_path, self.temp_dir)
-            
         main.DATA_DIR = self.temp_dir
         self.snapshot_patcher = patch('main.load_settlement_snapshot', return_value=None)
         self.snapshot_patcher.start()
         self.alert_state_patcher = patch('main.load_alert_state', return_value={})
         self.alert_state_patcher.start()
-        
+
         self.orig_config = main.APP_CONFIG.copy()
+        main.APP_CONFIG.clear()
+        main.APP_CONFIG.update(main.DEFAULT_APP_CONFIG)
         main.APP_CONFIG.update({
-            "RB_high_z_win_rate": 0.7500,
-            "RB_high_z_savings": 5.15,
-            "RB_high_z_count": 80,
-            "RB_mod_z_win_rate": 0.7619,
-            "RB_mod_z_savings": 2.81,
-            "RB_mod_z_count": 84,
-            "RB_low_z_win_rate": 0.6510,
-            "RB_low_z_savings": 0.80,
-            "RB_low_z_count": 255,
             "RB_nymex_daily_std": 10.0,
-            "RB_wait_upside_cvar_95": 17.25,
-            "HO_high_z_win_rate": -1.0,
-            "HO_high_z_savings": 0.0,
-            "HO_high_z_count": 10,
-            "HO_low_z_win_rate": 0.7277,
-            "HO_low_z_savings": 1.58,
-            "HO_low_z_count": 213,
             "HO_nymex_daily_std": 12.0,
-            "HO_wait_upside_cvar_95": 29.78,
-            "HO_HIKE_THRESHOLD_CENTS": 2.0,
-            "HO_DROP_THRESHOLD_CENTS": -2.0,
             "RB_HIKE_THRESHOLD_CENTS": 1.0,
             "RB_DROP_THRESHOLD_CENTS": -1.0,
+            "HO_HIKE_THRESHOLD_CENTS": 2.0,
+            "HO_DROP_THRESHOLD_CENTS": -2.0,
+            "RB_LEAN_HIKE_CENTS": 0.5,
+            "RB_LEAN_DROP_CENTS": -0.5,
+            "HO_LEAN_HIKE_CENTS": 1.0,
+            "HO_LEAN_DROP_CENTS": -1.0,
+            "RB_oos_precision": 0.82,
+            "RB_oos_alerts": 99,
+            "RB_oos_window": "2026-03-17..2026-09-16",
+            "HO_oos_precision": 0.79,
+            "HO_oos_alerts": 109,
+            "HO_oos_window": "2026-03-17..2026-09-16",
+            "HO_wait_cvar_status": "ok",
+            "HO_wait_cvar_95": 2.95,
+            "HO_wait_cvar_low": -0.84,
+            "HO_wait_cvar_high": 1.96,
+            "HO_wait_cvar_tail_n": 5,
+            "HO_wait_cvar_sample_n": 93,
+            "HO_wait_adverse_probability": 0.043,
+            "HO_wait_median_move": -6.39,
         })
+        main.APP_CONFIG.update(self._cache_for("RB", 0.70, 0.0, 3.0, seed=1))
+        main.APP_CONFIG.update(self._cache_for("HO", 0.93, 0.0, 4.0, seed=2))
         self.now = datetime.now()
 
     def tearDown(self):
@@ -1031,155 +1110,84 @@ class TestCategory11AlertFormatting(unittest.TestCase):
         self.alert_state_patcher.stop()
         self.snapshot_patcher.stop()
         main.DATA_DIR = self.orig_main_data_dir
-        main.APP_CONFIG = self.orig_config
+        main.APP_CONFIG.clear()
+        main.APP_CONFIG.update(self.orig_config)
         shutil.rmtree(self.temp_dir)
 
-    def test_11_1_rbob_buy_high_conviction_formatting(self):
-        import main
-        data = {
-            'current_price': 2.20,
-            'yesterday_close': 2.00,
-            'open_price': 2.00,
-            'high_price': 2.25,
-            'low_price': 1.95,
-            'daily_pct': 10.0,
-            'five_day_high': 2.25,
-            'five_day_low': 1.95,
-            'thirty_day_avg': 2.05,
-            'chart_intraday_b64': 'mock_base64',
-            'chart_5d_b64': 'mock_base64',
+    @staticmethod
+    def _data(current, prior=2.00):
+        return {
+            'current_price': current, 'yesterday_close': prior,
+            'open_price': prior, 'high_price': max(current, prior) + 0.05,
+            'low_price': min(current, prior) - 0.05, 'daily_pct': 0.0,
+            'five_day_high': 2.25, 'five_day_low': 1.95, 'thirty_day_avg': 2.05,
+            'chart_intraday_b64': 'mock_base64', 'chart_5d_b64': 'mock_base64',
         }
-        
-        signal = main.build_rack_signal('RB', data, self.now)
-        self.assertEqual(signal['action'], 'BUY_NOW')
-        self.assertEqual(signal['conviction'], 'High Conviction')
-        
-        risk_text = signal['risk_text']
-        self.assertIn("High Conviction (|Z| >= 1.5)", risk_text)
-        self.assertIn("win rate of 75.0%", risk_text)
-        self.assertIn("average savings of 5.15¢/gal", risk_text)
-        self.assertIn("53%–73%", risk_text)
-        self.assertIn("operational planning floor: 53%", risk_text)
 
-    def test_11_2_ho_wait_low_conviction_formatting(self):
+    def test_11_1_buy_quotes_a_calibrated_probability(self):
         import main
-        data = {
-            'current_price': 1.94,
-            'yesterday_close': 2.00,
-            'open_price': 2.00,
-            'high_price': 2.05,
-            'low_price': 1.90,
-            'daily_pct': -3.0,
-            'five_day_high': 2.05,
-            'five_day_low': 1.90,
-            'thirty_day_avg': 2.00,
-            'chart_intraday_b64': 'mock_base64',
-            'chart_5d_b64': 'mock_base64',
-        }
-        
-        signal = main.build_rack_signal('HO', data, self.now)
+        signal = main.build_rack_signal('RB', self._data(2.20), self.now)
+        self.assertEqual(signal['action'], 'BUY_NOW')
+        self.assertIn('High confidence', signal['conviction'])
+
+        risk_text = signal['risk_text']
+        self.assertIn('Model confidence:', risk_text)
+        self.assertIn('that the rack will rise tonight', risk_text)
+        self.assertIn('expected move', risk_text)
+        # A +20c NYMEX move at slope 0.70 is overwhelming; the quoted
+        # probability must reflect that rather than a coarse bin.
+        self.assertRegex(risk_text, r'Model confidence: 9\d%')
+
+    def test_11_2_wait_states_tail_risk_with_its_sample_size(self):
+        import main
+        signal = main.build_rack_signal('HO', self._data(1.94), self.now)
         self.assertEqual(signal['action'], 'WAIT')
-        self.assertEqual(signal['conviction'], 'Low Conviction')
-        
+
         risk_text = signal['risk_text']
-        self.assertIn("Risk Note", risk_text)
-        self.assertIn("worst 5% of WAIT-signal days", risk_text)
-        self.assertIn("8,500-gallon truck", risk_text)
-        self.assertIn("29.78¢/gal", risk_text)
+        self.assertIn('Deferral risk:', risk_text)
+        self.assertIn('the rack rose on 4% of 93 past WAIT signals', risk_text)
+        self.assertIn('median WAIT day moved -6.39¢/gal', risk_text)
+        self.assertIn('Worst 5% averaged +2.95¢/gal', risk_text)
+        self.assertIn('8,500-gal truck', risk_text)
+        # The uncertainty must travel with the number.
+        self.assertIn('only 5 observations', risk_text)
+        self.assertIn('95% CI -0.84 to +1.96¢/gal', risk_text)
 
-    def test_11_3_ho_insufficient_history_fallback(self):
+    def test_11_3_unquantified_tail_is_stated_not_guessed(self):
         import main
-        data = {
-            'current_price': 2.36,
-            'yesterday_close': 2.00,
-            'open_price': 2.00,
-            'high_price': 2.40,
-            'low_price': 1.98,
-            'daily_pct': 18.0,
-            'five_day_high': 2.40,
-            'five_day_low': 1.98,
-            'thirty_day_avg': 2.10,
-            'chart_intraday_b64': 'mock_base64',
-            'chart_5d_b64': 'mock_base64',
-        }
-        
-        signal = main.build_rack_signal('HO', data, self.now)
-        self.assertEqual(signal['action'], 'BUY_NOW')
-        self.assertEqual(signal['conviction'], 'High Conviction')
-        
-        risk_text = signal['risk_text']
-        self.assertIn("insufficient history", risk_text)
-        self.assertIn("60%–79%", risk_text)
-        self.assertIn("operational planning floor: 60%", risk_text)
+        main.APP_CONFIG['HO_wait_cvar_status'] = 'insufficient_tail'
+        signal = main.build_rack_signal('HO', self._data(1.94), self.now)
+        self.assertEqual(signal['action'], 'WAIT')
+        self.assertIn('too few WAIT observations', signal['risk_text'])
+        self.assertIn('unquantified', signal['risk_text'])
 
-    def test_11_4_rendered_html_layout_checks(self):
+    def test_11_4_no_hardcoded_performance_claims_anywhere(self):
+        """The stale README ranges must not reappear in any verdict text."""
         import main
-        rb_data = {
-            'current_price': 2.20,
-            'yesterday_close': 2.00,
-            'open_price': 2.00,
-            'high_price': 2.25,
-            'low_price': 1.95,
-            'daily_pct': 10.0,
-            'five_day_high': 2.25,
-            'five_day_low': 1.95,
-            'thirty_day_avg': 2.05,
-            'chart_intraday_b64': 'mock_base64',
-            'chart_5d_b64': 'mock_base64',
-        }
-        ho_data = {
-            'current_price': 1.94,
-            'yesterday_close': 2.00,
-            'open_price': 2.00,
-            'high_price': 2.05,
-            'low_price': 1.90,
-            'daily_pct': -3.0,
-            'five_day_high': 2.05,
-            'five_day_low': 1.90,
-            'thirty_day_avg': 2.00,
-            'chart_intraday_b64': 'mock_base64',
-            'chart_5d_b64': 'mock_base64',
-        }
-        
-        rb_signal = main.build_rack_signal('RB', rb_data, self.now)
-        ho_signal = main.build_rack_signal('HO', ho_data, self.now)
-        
-        rb_data['rack_signal'] = rb_signal
-        ho_data['rack_signal'] = ho_signal
-        
-        all_data = {'RB': rb_data, 'HO': ho_data}
-        alert_context = {'label': 'Final Verdict'}
-        
-        html, cids = main.build_html_email("Test Subject", all_data, self.now, alert_context)
-        
-        self.assertIn("High Conviction (|Z| >= 1.5)", html)
-        self.assertIn("win rate of 75.0%", html)
-        self.assertIn("53%–73%", html)
-        self.assertIn("operational planning floor: 53%", html)
-        
-        self.assertIn("Risk Note", html)
-        self.assertIn("8,500-gallon truck", html)
-        self.assertIn("29.78¢/gal", html)
+        for prefix, price in (('RB', 2.20), ('RB', 1.80), ('HO', 2.36), ('HO', 1.94)):
+            text = main.build_rack_signal(prefix, self._data(price), self.now)['risk_text']
+            for banned in ('53%–73%', '60%–79%', 'planning floor', 'Multi-year baseline'):
+                self.assertNotIn(banned, text)
+        source = inspect.getsource(main.build_risk_note)
+        for banned in ('53%', '73%', '60%', '79%'):
+            self.assertNotIn(banned, source)
 
-    def test_1_4_mask_recipient(self):
-        import weekly_report
-        # None address
-        self.assertEqual(weekly_report.mask_recipient(None), "None")
-        
-        # Email address
-        self.assertEqual(weekly_report.mask_recipient("abc@gmail.com"), "***@gmail.com")
-        self.assertEqual(weekly_report.mask_recipient("john.doe@domain.co"), "jo***e@domain.co")
-        
-        # Phone / Non-email address
-        self.assertEqual(weekly_report.mask_recipient("123"), "***")
-        self.assertEqual(weekly_report.mask_recipient("+15551234567"), "+1***67")
-        
-        # List of addresses
-        self.assertEqual(weekly_report.mask_recipient(["abc@gmail.com", "123"]), ["***@gmail.com", "***"])
-        
-        # Comma-separated addresses
-        self.assertEqual(weekly_report.mask_recipient("abc@gmail.com, 123"), ["***@gmail.com", "***"])
+    def test_11_5_out_of_sample_figure_carries_an_interval(self):
+        import main
+        text = main.build_rack_signal('RB', self._data(2.20), self.now)['risk_text']
+        self.assertIn('Out-of-sample: 82% correct on 99 alerts', text)
+        self.assertIn('95% CI', text)
+        self.assertIn('upper bound', text)
 
+    def test_11_6_missing_model_degrades_without_inventing_confidence(self):
+        """With no fitted model cached, the system must not quote a number."""
+        import main
+        for key in list(main.APP_CONFIG):
+            if key.startswith('RB_pt_'):
+                del main.APP_CONFIG[key]
+        signal = main.build_rack_signal('RB', self._data(2.20), self.now)
+        self.assertEqual(signal['conviction'], 'Confidence unavailable')
+        self.assertNotIn('Model confidence:', signal['risk_text'])
 
 class TestCategory12ProductionFailureProtection(unittest.TestCase):
     """Category 12: Production Failure Protection & Edge Cases"""
@@ -1392,12 +1400,20 @@ class TestCategory12ProductionFailureProtection(unittest.TestCase):
             'dummy_token'
         )
 
-        # With zero activity for all, volume fallback is bypassed (< 100 threshold).
-        # Falls through to math-based candidates[0].  Session date is May 27 (17:00 UTC =
-        # dt.hour >= 17 triggers +1 day in get_session_date_str).  May 27 is within the
-        # 3-business-day early-roll window before the May 30 LTD for RBM26, so the math
-        # correctly advances to the July contract (RBN26) as candidates[0].
-        self.assertEqual(resolved, '/RBN26', "With early_roll_days=3, May 27 session is in the roll window — should advance to July")
+        # With zero activity for all, volume fallback is bypassed (< 100 threshold)
+        # and the math-based candidates[0] is used.  Session date is May 27
+        # (17:00 UTC pushes get_session_date_str to the next day).
+        #
+        # The expected answer moved when DEFAULT_EARLY_ROLL_DAYS was corrected
+        # from an assumed 3 to a measured 2.  At 3, May 27 fell inside the
+        # early-roll window and the math jumped to July while the market was
+        # still quoting June.  The roll offset is now calibrated against the
+        # observed settle gaps (see futures_util.DEFAULT_EARLY_ROLL_DAYS), and
+        # at 2 the June contract is correctly still front month on May 27.
+        self.assertEqual(futures_util.DEFAULT_EARLY_ROLL_DAYS, 2)
+        self.assertEqual(resolved, '/RBM26',
+                         "At the calibrated 2-business-day early roll, May 27 is "
+                         "still the June contract")
 
 
     @patch('main.save_price_history')
@@ -1615,10 +1631,27 @@ class TestCategory12ProductionFailureProtection(unittest.TestCase):
         }
 
         signal = main.build_rack_signal('RB', data, datetime(2026, 5, 23, 13, 0))
-
-        self.assertAlmostEqual(signal['z_score'], 10.0)
-        self.assertEqual(signal['conviction'], 'High Conviction')
         self.assertNotIn("dynamic intraday vol override", signal['risk_text'])
+        # No pass-through model is present in this stubbed config, so the
+        # verdict must be suppressed rather than fall back to default
+        # thresholds and emit a confident-looking BUY built on nothing.
+        self.assertEqual(signal['action'], 'NO_EDGE')
+        self.assertEqual(signal['label'], 'Calibration unavailable')
+        self.assertEqual(signal['conviction'], 'Confidence unavailable')
+
+        # With a model present the Z-score denominator is still the calibrated
+        # daily std, which is what this test was originally guarding.
+        rng = np.random.default_rng(21)
+        x = rng.normal(0, 8, 400)
+        y = 0.7 * x + rng.normal(0, 3, 400)
+        full = dict(main.DEFAULT_APP_CONFIG)
+        full.update({'RB_HIKE_THRESHOLD_CENTS': 1.0, 'RB_DROP_THRESHOLD_CENTS': -1.0,
+                     'RB_LEAN_HIKE_CENTS': 0.5, 'RB_LEAN_DROP_CENTS': -0.5,
+                     'RB_nymex_daily_std': 1.0})
+        full.update(model.passthrough_to_config(model.fit_passthrough(x, y), 'RB'))
+        with patch.object(main, 'APP_CONFIG', full):
+            signal = main.build_rack_signal('RB', data, datetime(2026, 5, 23, 13, 0))
+        self.assertAlmostEqual(signal['z_score'], 10.0)
 
     @patch('main.get_repo_variable')
     @patch('main.set_repo_variable')
@@ -1846,43 +1879,40 @@ class TestCategory13LiveValidationAndRobustness(unittest.TestCase):
             self.assertEqual(mock_sleep.call_count, 2)
             mock_sleep.assert_has_calls([call(2), call(4)])
 
-    def test_13_7_backtest_clamp_bounds(self):
-        # Mock delta series
-        delta_nymex = pd.Series([2.0] * 10)
-        delta_rack = pd.Series([2.0] * 10)
-        
-        # Custom clamp bounds: min 1.0, max 2.5
-        h, d = backtest.train_thresholds(delta_nymex, delta_rack, Hp=15, Dp=85, clamp_bounds=(1.0, 2.5, -2.5, -1.0))
-        self.assertEqual(h, 2.0)
-        
-        # Clamp triggering min
-        delta_low = pd.Series([0.5] * 10)
-        h, d = backtest.train_thresholds(delta_low, delta_rack, Hp=15, Dp=85, clamp_bounds=(1.0, 2.5, -2.5, -1.0))
-        self.assertEqual(h, 1.0) # clamped to min 1.0
+    def test_13_7_threshold_bounds_are_enforced(self):
+        """Clamps and the noise floor both bound the published thresholds."""
+        rng = np.random.default_rng(5)
+        x = rng.normal(0, 8, 500)
+        y = 0.7 * x + rng.normal(0, 2, 500)
+        fit = model.fit_passthrough(x, y)
+        hike, drop = fit.threshold_for_confidence(0.75)
+        self.assertGreaterEqual(hike, model.MIN_ABS_THRESHOLD)
+        self.assertLessEqual(hike, model.MAX_ABS_THRESHOLD)
+        self.assertLessEqual(drop, -model.MIN_ABS_THRESHOLD)
+        self.assertGreaterEqual(drop, -model.MAX_ABS_THRESHOLD)
 
-    def test_13_8_conviction_smoothed_thresholds(self):
-        # Verify conviction loop smoothing starts correctly and runs with the alpha blend
-        cfg = {
-            "RB_HIKE_THRESHOLD_CENTS": 1.0,
-            "RB_DROP_THRESHOLD_CENTS": -1.0,
-            "BLEND_ALPHA": 0.5,
-            "CLAMP_HIKE_MIN": 0.3,
-            "CLAMP_HIKE_MAX": 3.0,
-            "CLAMP_DROP_MIN": -3.0,
-            "CLAMP_DROP_MAX": -0.3
-        }
-        # Create a mock dataframe of 50 rows
-        dates = pd.date_range("2026-01-01", periods=50)
-        df = pd.DataFrame({
-            "date": dates,
-            "nymex_rb": np.linspace(2.0, 2.5, 50),
-            "rack_u": np.linspace(2.1, 2.6, 50)
-        })
-        
-        # Just run optimization to verify it executes conviction loop without errors
-        res_cfg, msg, win = backtest.run_optimization(df, 'nymex_rb', 'rack_u', 'RB', cfg)
-        self.assertIn("RB_high_z_win_rate", res_cfg)
-        self.assertIn("RB_low_z_win_rate", res_cfg)
+        floored_hike, floored_drop = model.apply_noise_floor(hike, drop, 5.0)
+        self.assertGreaterEqual(floored_hike, 5.0)
+        self.assertLessEqual(floored_drop, -5.0)
+
+    def test_13_8_calibration_is_idempotent(self):
+        """Recalibrating identical history must not drift the thresholds.
+
+        The superseded engine blended each new fit into the previous cached
+        value with BLEND_ALPHA, so repeated runs over the same history walked
+        the thresholds.  The new engine is a pure function of its window.
+        """
+        full = alignment.load_history(backtest.CSV_PATH)
+        df = alignment.calibration_history(full)
+
+        first = dict(backtest.DEFAULTS)
+        first, _, _ = backtest.calibrate(df, 'RB', first)
+        second, _, _ = backtest.calibrate(df, 'RB', dict(first))
+
+        for key in ('RB_HIKE_THRESHOLD_CENTS', 'RB_DROP_THRESHOLD_CENTS',
+                    'RB_pt_slope', 'RB_pt_intercept', 'RB_oos_precision'):
+            self.assertEqual(first[key], second[key],
+                             f"{key} drifted on a repeated calibration")
 
     def test_13_4_get_decoupling_warning(self):
         import main
@@ -2307,9 +2337,25 @@ class TestCategory18OperationalPricingRules(unittest.TestCase):
             'schwab_symbol': 'test_symbol'
         }
         
-        signal = main.build_rack_signal('RB', data, now)
-        self.assertEqual(signal['conviction'], 'Low Conviction')
-        self.assertIn('Low Conviction — do not act on this signal unless inventory forces you to order regardless.', signal['text'])
+        # Install a deliberately weak pass-through so a +2c move sits below the
+        # confidence cutoff.  The old ladder keyed off |Z| < 1.0; the gate is now
+        # the calibrated probability itself.
+        rng = np.random.default_rng(4)
+        x = rng.normal(0, 8, 500)
+        y = 0.15 * x + rng.normal(0, 6, 500)
+        saved = main.APP_CONFIG.copy()
+        try:
+            main.APP_CONFIG.update(
+                model.passthrough_to_config(model.fit_passthrough(x, y), 'RB'))
+            signal = main.build_rack_signal('RB', data, now)
+            self.assertLess(float(signal['conviction'].rstrip('%)').split('(')[-1]) / 100.0,
+                            main.LOW_CONFIDENCE_CUTOFF)
+            self.assertIn('do not act on this signal unless inventory forces you '
+                          'to order regardless.', signal['text'])
+            self.assertRegex(signal['text'], r'Only \d+% confidence')
+        finally:
+            main.APP_CONFIG.clear()
+            main.APP_CONFIG.update(saved)
 
 
 
@@ -2344,15 +2390,23 @@ class TestCategory19EndToEndTuesdaySimulation(unittest.TestCase):
             'schwab_symbol': 'test_symbol'
         }
         
-        # 1. Generate signal
+        # 1. Generate signal under a deliberately weak pass-through, so the
+        #    +4c move triggers the threshold but not the confidence cutoff.
+        rng = np.random.default_rng(9)
+        x = rng.normal(0, 8, 500)
+        y = 0.15 * x + rng.normal(0, 6, 500)
+        main.APP_CONFIG.update(
+            model.passthrough_to_config(model.fit_passthrough(x, y), 'RB'))
+        self.addCleanup(lambda: [main.APP_CONFIG.pop(k, None)
+                                 for k in list(main.APP_CONFIG)
+                                 if k.startswith('RB_pt_')])
+
         signal = main.build_rack_signal('RB', rb_data, now)
         self.assertEqual(signal['action'], 'BUY_NOW')
-        self.assertEqual(signal['conviction'], 'Low Conviction')
         self.assertAlmostEqual(signal['change_cents'], 4.0, places=4)
-        self.assertEqual(
-            signal['text'].split(". ")[-1],
-            'Low Conviction — do not act on this signal unless inventory forces you to order regardless.'
-        )
+        self.assertRegex(signal['text'], r'Only \d+% confidence')
+        self.assertTrue(signal['text'].rstrip().endswith(
+            'do not act on this signal unless inventory forces you to order regardless.'))
         
         # 2. Verify HTML verdict email
         all_data = {'RB': rb_data}
@@ -2364,7 +2418,7 @@ class TestCategory19EndToEndTuesdaySimulation(unittest.TestCase):
         self.assertNotIn("⚠️", html_body)
         self.assertIn("UNLEADED HIKE LIKELY:", html_body)
         self.assertIn("Est. Realized Savings: +2.00¢/gal (at 50% same-day dispatch rate)", html_body)
-        self.assertIn("Low Conviction — do not act on this signal unless inventory forces you to order regardless.", html_body)
+        self.assertIn("do not act on this signal unless inventory forces you to order regardless.", html_body)
         self.assertNotIn("Operational Checklist & Dispatch Rules", html_body)
 
     @patch('main.get_repo_variable', return_value=None)
@@ -2397,14 +2451,21 @@ class TestCategory19EndToEndTuesdaySimulation(unittest.TestCase):
             'schwab_symbol': 'test_symbol'
         }
 
-        # Freeze APP_CONFIG so nymex_daily_std is deterministic for this test
+        # Freeze APP_CONFIG with a realistic fitted pass-through so the quoted
+        # confidence is deterministic regardless of the live cache.
+        rng = np.random.default_rng(12)
+        x = rng.normal(0, 8, 500)
+        y = 0.70 * x + rng.normal(0, 3, 500)
         frozen_config = dict(main.APP_CONFIG)
         frozen_config['RB_nymex_daily_std'] = 8.9551
+        frozen_config.update(
+            model.passthrough_to_config(model.fit_passthrough(x, y), 'RB'))
         with patch.object(main, 'APP_CONFIG', frozen_config):
             # 1. Generate signal
             signal = main.build_rack_signal('RB', rb_data, now)
         self.assertEqual(signal['action'], 'BUY_NOW')
-        self.assertEqual(signal['conviction'], 'High Conviction')
+        # A +21c move at slope 0.70 against a 3c residual spread is decisive.
+        self.assertIn('High confidence', signal['conviction'])
         self.assertAlmostEqual(signal['change_cents'], 21.0, places=4)
         self.assertEqual(
             signal['text'].split(". ")[-1],

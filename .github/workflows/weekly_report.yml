@@ -2,7 +2,8 @@ name: Weekly Performance Dashboard
 
 on:
   schedule:
-    # Run at 8:00 AM UTC every Saturday (3:00 AM CT)
+    # 08:00 UTC every Saturday = 3:00 AM CDT / 2:00 AM CST.  Either way it runs
+    # after Friday night's ingest has committed, which is what matters.
     - cron: '0 8 * * 6'
   workflow_dispatch:
 

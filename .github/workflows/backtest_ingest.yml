@@ -2,7 +2,18 @@ name: Daily Price Ingestion
 
 on:
   schedule:
-    - cron: '0 0,1,2,3,4,5,13,14 * * 2-6' # Runs hourly from 7:00 PM to 12:00 AM CT (Mon-Fri evenings) and at 8:00 AM CT (Mon-Fri mornings) to retry ingestion
+    # Evening ingestion, hourly.  UTC hours 0-6 cover 7:00 PM - 1:00 AM CT under
+    # CDT and 6:00 PM - midnight CT under CST, so the post-midnight retry
+    # survives the winter shift.  The previous range (0-5) lost the midnight
+    # hour for the five months the US is on CST.
+    #
+    # Day-of-week 2-6 is Tue-Sat in UTC, which is Mon-Fri *evening* in CT --
+    # a Monday 8 PM CT run is already Tuesday in UTC.
+    #
+    # UTC 13-14 is 8:00-9:00 AM CT the next morning.  ingest_prices targets the
+    # previous day before noon, so the Tue-Sat window retries Mon-Fri sessions;
+    # Monday morning is correctly absent because it would target Sunday.
+    - cron: '0 0,1,2,3,4,5,6,13,14 * * 2-6'
   workflow_dispatch:
 
 concurrency:

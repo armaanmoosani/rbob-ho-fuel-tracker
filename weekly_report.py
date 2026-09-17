@@ -8,7 +8,10 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.image import MIMEImage
 from datetime import datetime
 import validate_data
+from scipy import stats
 from scipy.stats import norm
+from datetime import date as _date
+from futures_util import previous_nymex_business_day
 import pytz
 import json
 
@@ -52,35 +55,96 @@ def mask_sensitive_text(text):
     return text
 
 
-def mann_kendall_test(x):
+def mann_kendall_test(x, autocorrelation_correction=True):
+    """Mann-Kendall trend test, with the Hamed-Rao variance correction.
+
+    Mann-Kendall assumes independent observations.  It is applied here to the
+    basis *level* (rack minus NYMEX), which is strongly persistent: the
+    observed lag-1 autocorrelation is 0.85 for RB and 0.72 for HO.  Under those
+    conditions the uncorrected test is wildly anti-conservative -- simulated
+    against an AR(1) null with no trend at all, a nominal 5% test rejects:
+
+        rho    0.0    0.5    0.8    0.9    0.95
+        rate   3.8%  25.0%  47.2%  61.0%  72.0%
+
+    so "significant basis drift detected" fired roughly every other week on
+    noise.  Hamed and Rao (1998) inflate Var(S) by a factor computed from the
+    autocorrelation of the ranks, which restores the nominal size.
+
+    Returns (drifted, p_value, sens_slope, tau).
+    """
+    x = np.asarray(x, dtype=float)
     n = len(x)
     if n < 10:
         return False, 1.0, 0.0, 0.0
-    s = 0
-    for i in range(n - 1):
-        for j in range(i + 1, n):
-            s += np.sign(x[j] - x[i])
+
+    # S statistic, vectorised: sum of sign(x_j - x_i) over all i < j.
+    differences = x[None, :] - x[:, None]
+    s = float(np.sign(differences[np.triu_indices(n, k=1)]).sum())
+
     unique_x, counts = np.unique(x, return_counts=True)
-    tie_sum = 0
-    for t in counts:
-        if t > 1:
-            tie_sum += t * (t - 1) * (2 * t + 5)
+    tie_sum = float(sum(t * (t - 1) * (2 * t + 5) for t in counts if t > 1))
     var_s = (n * (n - 1) * (2 * n + 5) - tie_sum) / 18.0
+
+    if autocorrelation_correction:
+        var_s *= _hamed_rao_variance_inflation(x)
+
+    if var_s <= 0:
+        return False, 1.0, 0.0, 0.0
     if s > 0:
         z = (s - 1) / np.sqrt(var_s)
     elif s < 0:
         z = (s + 1) / np.sqrt(var_s)
     else:
         z = 0.0
-    p_value = 2 * (1 - norm.cdf(abs(z)))
-    slopes = []
-    for i in range(n - 1):
-        for j in range(i + 1, n):
-            slopes.append((x[j] - x[i]) / (j - i))
-    sens_slope = np.median(slopes) if slopes else 0.0
-    tau = s / (0.5 * n * (n - 1))
+    p_value = float(2 * (1 - norm.cdf(abs(z))))
+
+    # Sen's slope: median of all pairwise slopes.
+    i_idx, j_idx = np.triu_indices(n, k=1)
+    slopes = (x[j_idx] - x[i_idx]) / (j_idx - i_idx)
+    sens_slope = float(np.median(slopes)) if slopes.size else 0.0
+
+    # tau-b: ties are already removed from the denominator, matching the
+    # tie-corrected variance above.  The previous code mixed a tie-corrected
+    # variance with an uncorrected tau-a.
+    n_pairs = 0.5 * n * (n - 1)
+    tie_pairs = float(sum(t * (t - 1) / 2 for t in counts if t > 1))
+    denominator = np.sqrt((n_pairs - tie_pairs) * n_pairs)
+    tau = float(s / denominator) if denominator > 0 else 0.0
+
     return (p_value < 0.05), p_value, sens_slope, tau
 
+
+def _hamed_rao_variance_inflation(x):
+    """Variance inflation factor for a serially correlated series.
+
+    Computed from the autocorrelation of the *ranks*, which is what the
+    rank-based S statistic actually depends on.  Only lags whose
+    autocorrelation is significant at 5% contribute, so a genuinely
+    independent series gets a factor of ~1 and the test is unchanged.
+    """
+    n = len(x)
+    ranks = stats.rankdata(x)
+    centred = ranks - ranks.mean()
+    denominator = float(centred @ centred)
+    if denominator == 0:
+        return 1.0
+
+    max_lag = min(n - 2, max(1, n // 4))
+    bound = 1.96 / np.sqrt(n)
+    total = 0.0
+    for lag in range(1, max_lag + 1):
+        rho = float(centred[:-lag] @ centred[lag:]) / denominator
+        if abs(rho) <= bound:
+            continue  # indistinguishable from zero; do not inflate on noise
+        total += (n - lag) * (n - lag - 1) * (n - lag - 2) * rho
+
+    if total == 0.0:
+        return 1.0
+    factor = 1.0 + (2.0 / (n * (n - 1) * (n - 2))) * total
+    # A factor below 1 would make the test *more* liberal, which is never the
+    # intent of a correction for positive persistence.
+    return float(max(factor, 1.0))
 
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
@@ -92,7 +156,16 @@ TZ = pytz.timezone('America/Chicago')
 os.makedirs(REPORTS_DIR, exist_ok=True)
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 MIN_LIVE_PREDICTIONS_FOR_SIGNIFICANCE = 30
-CAPTURED_CONVICTION_LABELS = ["Low Conviction", "Moderate Conviction", "High Conviction"]
+# Written when the session before a prediction is missing from the history,
+# so the rack move cannot be attributed to that one session.  Distinct from
+# PENDING so the row is not retried every week.
+UNRESOLVABLE_GAP = "NO_PRIOR_SESSION"
+# Reporting bands.  The live path now writes "Low/Moderate/High confidence
+# (NN%) | p=0.NNNN"; rows from the superseded Z-score ladder read
+# "Low/Moderate/High Conviction".  Both map onto these three bands so the
+# dashboard keeps reporting across the changeover.
+CAPTURED_CONVICTION_LABELS = ["Low confidence", "Moderate confidence", "High confidence"]
+CAPTURED_PROVENANCE = {"captured", "passthrough_model_v2"}
 
 def load_config():
     defaults = {
@@ -107,6 +180,23 @@ def load_config():
         except Exception:
             pass
     return cfg
+
+
+PROXY_SETTLEMENT_PREFIXES = ("live_proxy", "legacy_unknown", "unknown")
+
+
+def settlement_based(df_source):
+    """Keep only rows decided from a captured 1:30 PM settlement snapshot.
+
+    A verdict computed from a live price proxy is not the same measurement as
+    one computed from the settle the model was calibrated on, so it cannot
+    support a performance claim about the settlement-window alert.
+    """
+    if "settlement_source" not in df_source.columns:
+        return df_source.copy()
+    source = df_source["settlement_source"].fillna("unknown").astype(str)
+    keep = ~source.str.startswith(PROXY_SETTLEMENT_PREFIXES)
+    return df_source[keep].copy()
 
 
 def summarize_prediction_source(df_source, now_chicago, dispatch_rate):
@@ -136,19 +226,45 @@ def summarize_prediction_source(df_source, now_chicago, dispatch_rate):
     }
 
 
+def conviction_band(label):
+    """Normalise a recorded conviction label to one of the reported bands.
+
+    Two formats exist in the log and both must keep reporting:
+
+    * legacy Z-score ladder -- "High Conviction"
+    * calibrated model      -- "High confidence (94%) | p=0.9412"
+
+    The band is always taken from what was written at decision time, never
+    recomputed, so changing the runtime config cannot retroactively re-grade a
+    past alert.
+    """
+    text = str(label).split(" |")[0].strip()
+    for band in CAPTURED_CONVICTION_LABELS:
+        if text.startswith(band.split()[0]):
+            return band
+    return None
+
+
 def summarize_captured_convictions(df_source):
     """Report conviction performance only from labels recorded at decision time."""
+    empty = {label: {"alerts": 0, "precision": 0.0, "savings_cents": 0.0}
+             for label in CAPTURED_CONVICTION_LABELS}
     required = {"conviction_provenance", "conviction_label", "predicted_direction"}
     if not required.issubset(df_source.columns):
-        return {label: {"alerts": 0, "precision": 0.0, "savings_cents": 0.0} for label in CAPTURED_CONVICTION_LABELS}
+        return empty
+
     captured = df_source[
-        (df_source["conviction_provenance"] == "captured")
-        & (df_source["conviction_label"].isin(CAPTURED_CONVICTION_LABELS))
-        & (df_source["predicted_direction"].isin(["HIKE", "DROP"]))
-    ]
+        df_source["conviction_provenance"].isin(CAPTURED_PROVENANCE)
+        & df_source["predicted_direction"].isin(["HIKE", "DROP"])
+    ].copy()
+    if captured.empty:
+        return empty
+    captured["band"] = captured["conviction_label"].map(conviction_band)
+    captured = captured[captured["band"].notna()]
+
     summary = {}
     for label in CAPTURED_CONVICTION_LABELS:
-        rows = captured[captured["conviction_label"] == label]
+        rows = captured[captured["band"] == label]
         alerts = len(rows)
         summary[label] = {
             "alerts": alerts,
@@ -252,26 +368,43 @@ def main():
             log_df[col] = "unknown"
         log_df[col] = log_df[col].fillna("unknown").astype(str)
 
-    # Backfill PENDING outcomes
+    # Backfill PENDING outcomes.
+    #
+    # The column also holds the literal "PENDING", so it is a string column.
+    # Assigning a float into it raises under the pandas 3 string dtype, which
+    # silently broke every outcome resolution on that version; the value is
+    # therefore formatted as a string here.
+    #
+    # The outcome must span exactly the same one session as the signal did.
+    # Indexing the previous *row* rather than the previous *session* meant that
+    # whenever a night's ingest failed, a two-session rack move was scored
+    # against a one-session NYMEX move.
     updates_made = False
     hist_date_to_idx = {date_str: idx for idx, date_str in enumerate(hist_df['date'])}
     for idx, row in log_df.iterrows():
-        if str(row['actual_next_day_move_cents']) == 'PENDING':
-            pred_date = row['timestamp'].split('T')[0]
-            # Find pred_date in hist_df (= day T, when prediction was made)
-            hist_idx = hist_date_to_idx.get(pred_date)
-            if hist_idx is not None and hist_idx - 1 >= 0:
-                prev_idx = hist_idx - 1
-                curr_row = hist_df.iloc[hist_idx]   # rack[T] = tonight's new price
-                prev_row = hist_df.iloc[prev_idx]       # rack[T-1] = last night's price
-                
-                rack_col = 'rack_u' if row['commodity'] == 'RB' else 'rack_d'
-                
-                if pd.notna(curr_row[rack_col]) and pd.notna(prev_row[rack_col]):
-                    # rack[T] - rack[T-1]: positive = rack went up (hike was correct)
-                    move = (curr_row[rack_col] - prev_row[rack_col]) * 100
-                    log_df.at[idx, 'actual_next_day_move_cents'] = round(move, 2)
-                    updates_made = True
+        if str(row['actual_next_day_move_cents']) != 'PENDING':
+            continue
+        pred_date = row['timestamp'].split('T')[0]
+        hist_idx = hist_date_to_idx.get(pred_date)
+        if hist_idx is None or hist_idx - 1 < 0:
+            continue
+        curr_row = hist_df.iloc[hist_idx]        # rack[T] = tonight's new price
+        prev_row = hist_df.iloc[hist_idx - 1]    # candidate rack[T-1]
+
+        expected_prev = previous_nymex_business_day(_date.fromisoformat(pred_date))
+        if str(prev_row['date'])[:10] != expected_prev.isoformat():
+            log_df.at[idx, 'actual_next_day_move_cents'] = UNRESOLVABLE_GAP
+            updates_made = True
+            print(f"  {pred_date} {row['commodity']}: previous session "
+                  f"{expected_prev.isoformat()} missing from history "
+                  f"(found {str(prev_row['date'])[:10]}); outcome not scoreable.")
+            continue
+
+        rack_col = 'rack_u' if row['commodity'] == 'RB' else 'rack_d'
+        if pd.notna(curr_row[rack_col]) and pd.notna(prev_row[rack_col]):
+            move = (curr_row[rack_col] - prev_row[rack_col]) * 100
+            log_df.at[idx, 'actual_next_day_move_cents'] = f"{move:.2f}"
+            updates_made = True
 
     if updates_made:
         log_df.to_csv(LOG_PATH, index=False)
@@ -310,11 +443,18 @@ def main():
     now_chicago = pd.Timestamp.now(tz='America/Chicago')
     cfg = load_config()
     dispatch_rate = cfg.get("DISPATCH_SAME_DAY_RATE", 0.50)
-    live_df = resolved_df[resolved_df['prediction_source'] == 'live'].copy()
+    live_df = settlement_based(resolved_df[resolved_df['prediction_source'] == 'live'])
+    proxy_df = resolved_df[
+        (resolved_df['prediction_source'] == 'live')
+        & ~resolved_df.index.isin(live_df.index)
+    ].copy()
     backfill_df = resolved_df[resolved_df['prediction_source'] == 'backfill'].copy()
-    unlabelled_df = resolved_df[resolved_df['prediction_source'] == 'unlabelled'].copy()
-    live_summary = summarize_prediction_source(live_df, now_chicago, dispatch_rate)
     backfill_summary = summarize_prediction_source(backfill_df, now_chicago, dispatch_rate)
+    proxy_excluded_count = len(proxy_df)
+    if proxy_excluded_count:
+        print(f"Excluded {proxy_excluded_count} live row(s) decided from a price proxy "
+              f"rather than a settlement snapshot; they do not enter any performance "
+              f"figure.")
     captured_convictions = summarize_captured_convictions(live_df)
     captured_conviction_count = sum(item["alerts"] for item in captured_convictions.values())
     conviction_rows_html = "".join(
@@ -329,8 +469,18 @@ def main():
     live_prediction_count = int((log_df['prediction_source'] == 'live').sum())
     backfill_prediction_count = int((log_df['prediction_source'] == 'backfill').sum())
     unlabelled_prediction_count = int((log_df['prediction_source'] == 'unlabelled').sum())
+    proxy_note = (
+        f" {proxy_excluded_count} live row(s) were decided from a live price proxy "
+        f"outside the settlement window and are excluded from every figure below."
+        if proxy_excluded_count else ""
+    )
 
-    # All operational metrics below are intentionally restricted to recorded live rows.
+    # All operational metrics below are restricted to live rows that were
+    # actually decided from a settlement snapshot.  Rows produced outside the
+    # settlement window run off a live price proxy: four such rows exist, and
+    # one of them recorded a +20.00c move against a settle that moved +7.43c.
+    # Scoring those alongside genuine settlement decisions overstates what the
+    # 2:35 PM verdict is worth.
     df = live_df
     pred = df['predicted_direction']
     actual = df['actual_move']
@@ -685,7 +835,7 @@ def main():
                             <td style="background-color: #f8fafc; padding: 24px; text-align: center; border-bottom: 1px solid #e2e8f0;">
                                 <h1 style="margin: 0; color: #0f172a; font-size: 24px; font-weight: 600; line-height: 1.2;">Weekly Performance Report</h1>
                                 <p style="margin: 8px 0 0 0; color: #64748b; font-size: 14px; font-weight: 500;">Graves Oil Predictive Engine</p>
-                                <p style="margin: 12px 0 0 0; padding: 10px; color: #92400e; background-color: #fffbeb; border: 1px solid #fcd34d; border-radius: 4px; font-size: 13px; font-weight: 700;">Recorded live predictions: {live_prediction_count} | Backfilled historical estimates: {backfill_prediction_count} | Unlabelled legacy rows: {unlabelled_prediction_count}</p>
+                                <p style="margin: 12px 0 0 0; padding: 10px; color: #92400e; background-color: #fffbeb; border: 1px solid #fcd34d; border-radius: 4px; font-size: 13px; font-weight: 700;">Recorded live predictions: {live_prediction_count} | Backfilled historical estimates: {backfill_prediction_count} | Unlabelled legacy rows: {unlabelled_prediction_count}.{proxy_note}</p>
                             </td>
                         </tr>
                         

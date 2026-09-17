@@ -120,7 +120,25 @@ def git_pull_rebase():
         print(f"Git pull failed: {e}")
         sys.exit(1)
 
+def push_is_authorised():
+    """Only the scheduled workflow may publish, unless asked explicitly.
+
+    Same guard as backtest.py: running this by hand with real credentials
+    should not silently commit to the production branch.
+    """
+    if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+        return True
+    if os.environ.get("INGEST_ALLOW_PUSH") == "1":
+        return True
+    return "--commit" in sys.argv
+
+
 def git_commit_push(message):
+    if not push_is_authorised():
+        print(f"Prices written locally; not committing.\n"
+              f"  Would have committed: {message}\n"
+              f"  Pass --commit (or set INGEST_ALLOW_PUSH=1) to publish.")
+        return
     subprocess.run([
         "git", "add", "data/graves_history.csv", "data/nymex_settlement_provenance.csv",
         "data/integrity_hashes.csv"

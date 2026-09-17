@@ -4,8 +4,15 @@ import os
 import re
 import getpass
 import pandas as pd
+import pytz
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from bs4 import BeautifulSoup
+
+# Graves posts its rack in the evening US Central time.  Every date derived
+# from an email header must be expressed in this zone before it is used as a
+# session date.
+TZ = pytz.timezone("America/Chicago")
 
 SENDER_SEARCH = "donotreply@gravesoil.com"
 OUTPUT_CSV = "../data/graves_history.csv"
@@ -30,21 +37,40 @@ def fetch_all_graves_emails(mail):
     return messages[0].split()
 
 def parse_email_date(msg):
-    date_str = msg.get("Date", "")
-    for fmt in [
-        "%a, %d %b %Y %H:%M:%S %z",
-        "%a, %d %b %Y %H:%M:%S %Z",
-        "%d %b %Y %H:%M:%S %z",
-    ]:
-        try:
-            return datetime.strptime(date_str.strip(), fmt).strftime("%Y-%m-%d")
-        except ValueError:
-            continue
-    date_str_clean = re.sub(r'\s+\(.*\)$', '', date_str).strip()
-    try:
-        return datetime.strptime(date_str_clean, "%a, %d %b %Y %H:%M:%S %z").strftime("%Y-%m-%d")
-    except Exception:
+    """Return the session date of a Graves email, in America/Chicago.
+
+    THIS IS THE DEFECT THAT CORRUPTED graves_history.csv.
+
+    The original implementation formatted the ``Date:`` header with strftime
+    *without converting the timezone first*.  Graves sends the rack email in
+    the evening, around 8 PM CT.  A header carrying a UTC offset puts that at
+    01:00 the following day, so ``strftime("%Y-%m-%d")`` returned tomorrow's
+    date and every affected row landed one session late: its rack price was
+    then joined against the *next* day's settle.
+
+    The fingerprint is still visible in the file -- 2023 has 42 Saturday rows
+    and zero Monday rows, because a Friday evening email became Saturday and a
+    Monday evening email became Tuesday.  See ``alignment.py``; those rows are
+    excluded from calibration because the Monday settles needed to repair them
+    were never backfilled.
+
+    ``email.utils.parsedate_to_datetime`` handles every RFC 2822 form including
+    the obsolete zone names, so the hand-rolled format list is gone too.
+    """
+    raw = msg.get("Date", "")
+    if not raw:
         return None
+    try:
+        parsed = parsedate_to_datetime(raw.strip())
+    except (TypeError, ValueError):
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        # A header with no zone is assumed to already be local; treating it as
+        # UTC would reintroduce exactly the bug above.
+        parsed = TZ.localize(parsed)
+    return parsed.astimezone(TZ).date().isoformat()
 
 def get_body(msg):
     body_text = ""
