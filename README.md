@@ -154,6 +154,13 @@ This is why the performance figures above cover ~1 year rather than ~3.
 - **Real-time SMS & email alerts** — polls Schwab and Yahoo Finance during CME
   hours and sends the verdict at 2:35 PM CT. Also shows the 3:2:1 crack spread
   per barrel of crude: `(2·RB·42 + 1·HO·42 − 3·CL)/3 = 28·RB + 14·HO − CL`.
+- **Delivery is confirmed, not assumed** — the "sent today" lock is taken only
+  after a recipient is actually reached, so a failed send is retried on the next
+  five-minute cycle instead of being lost. If the formatted email cannot be
+  built or sent, a plain-text fallback carries the verdict anyway.
+- **Premium is covered** — across 239 verified sessions the premium and unleaded
+  racks never moved in opposite directions (mean daily difference 0.005¢), so
+  the unleaded verdict applies to premium unchanged and says so.
 - **Overnight verification** — backfills outcomes from the next rack posting.
   An outcome is only scored when the preceding session is present in the
   history, so a failed ingest cannot turn a two-session move into a one-session
@@ -176,9 +183,10 @@ This is why the performance figures above cover ~1 year rather than ~3.
 3. **Settlement-only performance.** Verdicts computed from a live price proxy
    outside the settlement window are logged but excluded from every performance
    figure.
-4. **$1.00 daily jump / $1.00–$10.00 range.** Gross data-entry guards. Note the
-   ingest parser separately enforces $1.50–$6.00 and diesel has already reached
-   $5.47, so that ceiling needs raising before the next major rally.
+4. **$1.00 daily jump / $1.00–$10.00 range.** Gross data-entry guards. The
+   invoice parser, the bulk importer and the validator now share these bounds;
+   a test fails if any rack price comes within 20% of the ceiling, so the
+   parser cannot start silently rejecting real invoices during a rally.
 
 ---
 
@@ -239,3 +247,35 @@ not (they compared against quantities that were zero by construction).
 
 Decision-support only, not financial advice. The maintainers are not responsible
 for purchasing decisions, stockouts, or losses arising from use of this tool.
+
+---
+
+## What was tested and rejected
+
+Six further modelling upgrades were evaluated by expanding-origin out-of-sample
+Brier skill and calibration gap. Every one is a real, statistically significant
+in-sample effect that does **not** survive estimation on ~250 observations:
+
+| Candidate | In-sample evidence | OOS Brier skill (RB) |
+|---|---|---|
+| Heteroscedastic σ ~ \|move\| | 3.4× spread, p < 1e-4 | +0.093 → +0.064 |
+| Basis error-correction term | +1.6pp R², p < 1e-4 | +0.093 → **−0.210** |
+| RB↔HO cross term | +1.1pp R², p = 0.0008 | +0.093 → **−0.533** |
+| Asymmetric up/down slopes | not significant (p = 0.10 / 0.18) | — |
+| Day-of-week effect | not significant (p = 0.44 / 0.82) | — |
+| Expected-value decision rule | — | identical total value |
+
+The constant-σ model wins at every training window tried. **Adding structure to
+this model makes it worse, not better.** The binding constraint is sample size,
+not model form — which is why recovering the legacy era (see
+`docs/history-alignment.md`) is the only change that would raise the ceiling.
+
+Two further things were measured rather than assumed:
+
+- The 1.2¢ snapshot noise floor costs **zero** alerts historically. It is free
+  insurance, not a trade-off.
+- Alert frequency and per-alert value trade off exactly; total value is
+  conserved across every threshold rule tested. Raising
+  `TARGET_SIGNAL_CONFIDENCE` gives fewer, larger alerts and lowering it gives
+  more, smaller ones, with the same total. Pick it to match how many loads you
+  can actually reschedule, not to chase accuracy.
