@@ -184,8 +184,13 @@ def check_inbox_for_prices(target_date_str):
         if os.path.exists(config_path):
             with open(config_path, "r") as f:
                 cfg = json.load(f)
-                price_min = cfg.get("PRICE_MIN", 1.50)
-                price_max = cfg.get("PRICE_MAX", 6.00)
+                # Must match validate_data.validate_graves_history, which
+                # accepts [1.00, 10.00].  The old 6.00 ceiling was already
+                # within 10% of live diesel ($5.47 in 2026); crossing it would
+                # have made the parser silently reject a valid invoice and
+                # stall the pipeline.
+                price_min = cfg.get("PRICE_MIN", 1.00)
+                price_max = cfg.get("PRICE_MAX", 10.00)
     except Exception as cfg_e:
         print(f"Error loading price bounds config: {mask_sensitive_text(cfg_e)}")
         

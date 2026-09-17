@@ -99,7 +99,7 @@ def extract_price_near_label(text, label):
 def validate_price(price, label):
     if price is None:
         return False
-    if not (1.50 <= price <= 6.00):
+    if not (1.00 <= price <= 10.00):  # matches validate_data's bounds
         return False
     return True
 

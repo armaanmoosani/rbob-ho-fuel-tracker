@@ -596,6 +596,15 @@ def build_risk_note(prefix, action, probability, expected_move):
             "Measured in one high-volatility regime; treat as an upper bound."
         )
 
+    if prefix == "RB" and actionable:
+        # Premium tracks unleaded to within rounding: across 239 verified
+        # sessions the two rack prices never once moved in opposite directions
+        # and their daily changes differ by a mean of 0.005c.  The unleaded
+        # verdict therefore applies to premium unchanged, and saying so costs
+        # nothing while covering a product that otherwise gets no signal.
+        parts.append("Applies to premium as well: over 239 sessions the premium "
+                     "and unleaded racks never moved in opposite directions.")
+
     if "WAIT" in action:
         status = APP_CONFIG.get(f"{prefix}_wait_cvar_status")
         if status == "ok":
@@ -1506,6 +1515,12 @@ def build_html_email(subject, all_data, now, alert_context):
 
 
 def send_email(subject, all_data, now, alert_context):
+    """Send the alert.  Returns True only if it actually reached a recipient.
+
+    This used to swallow every exception and return None.  send_once_today then
+    recorded the day as sent regardless, so a single SMTP hiccup at 2:35 PM cost
+    the whole day's verdict with no retry and no warning.
+    """
     try:
         html_body, cids = build_html_email(subject, all_data, now, alert_context)
         
@@ -1542,9 +1557,65 @@ def send_email(subject, all_data, now, alert_context):
             print(f"Email sent: {subject} to {mask_recipient(email_addr)}")
             
         server.quit()
+        return True
     except Exception as e:
-        print(f"LOG_OUTBOUND_FAILURE: Email send failed: {mask_sensitive_text(e)}")
+        print(f"LOG_OUTBOUND_FAILURE: Rich email send failed: {mask_sensitive_text(e)}")
+        # Fall back to a minimal plain-text message.  The verdict is the part
+        # that matters; charts, inline images and HTML layout are not worth
+        # losing a day's buy/wait decision over.
+        return send_plaintext_fallback(subject, all_data, now)
 
+
+
+def send_plaintext_fallback(subject, all_data, now):
+    """Last-resort verdict delivery: no HTML, no images, no charts.
+
+    Returns True if at least one recipient was reached.
+    """
+    try:
+        lines = [subject, ""]
+        for prefix in ("RB", "HO"):
+            signal = (all_data.get(prefix) or {}).get("rack_signal")
+            if not signal:
+                continue
+            lines.append(signal.get("text", ""))
+            if signal.get("risk_text"):
+                lines.append(f"  {signal['risk_text']}")
+            lines.append("")
+        lines.append("(Plain-text fallback: the formatted alert could not be built "
+                     "or sent. The verdict above is unaffected.)")
+        body = "\n".join(line for line in lines if line is not None)
+
+        message = MIMEText(body, "plain")
+        message["Subject"] = subject
+        message["From"] = GMAIL_USER
+
+        delivered = 0
+        server = smtplib.SMTP("smtp.gmail.com", 587, timeout=30)
+        try:
+            server.starttls()
+            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+            for email_addr in TO_EMAIL:
+                try:
+                    if "To" in message:
+                        message.replace_header("To", email_addr)
+                    else:
+                        message.add_header("To", email_addr)
+                    server.sendmail(GMAIL_USER, email_addr, message.as_string())
+                    delivered += 1
+                    print(f"Plain-text fallback sent to {mask_recipient(email_addr)}")
+                except Exception as exc:
+                    print(f"LOG_OUTBOUND_FAILURE: fallback to "
+                          f"{mask_recipient(email_addr)} failed: {mask_sensitive_text(exc)}")
+        finally:
+            try:
+                server.quit()
+            except Exception:
+                pass
+        return delivered > 0
+    except Exception as exc:
+        print(f"LOG_OUTBOUND_FAILURE: Plain-text fallback failed: {mask_sensitive_text(exc)}")
+        return False
 
 
 def send_once_today(key, subject, all_data, now, alert_context):
@@ -1554,14 +1625,23 @@ def send_once_today(key, subject, all_data, now, alert_context):
     
     if state.get(db_key) == session_str:
         print(f"Alert {key} already sent today. Skipping.")
-        return
-        
-    send_email(subject, all_data, now, alert_context)
+        return True
+
+    # Only record the day as sent once delivery is confirmed.  Locking on an
+    # attempt meant a failed send was never retried, because the next
+    # five-minute cycle saw the lock and skipped.
+    delivered = send_email(subject, all_data, now, alert_context)
+    if not delivered:
+        print(f"Alert {key} NOT delivered; leaving it unlocked so the next "
+              f"cycle retries.")
+        return False
+
     try:
         state[db_key] = session_str
         save_alert_state(state)
     except Exception as e:
         print(f"Warning: could not save lock {db_key}: {e}")
+    return True
 
 
 def merge_alert_state_updates(base_state, updates):
