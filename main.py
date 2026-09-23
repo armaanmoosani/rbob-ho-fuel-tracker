@@ -384,13 +384,20 @@ def file_sha256(path):
 
 def decision_provenance(prefix, signal_price, baseline_price, *, nymex_daily_std=None,
                         z_score=None, conviction_label="Not evaluated",
-                        conviction_provenance="suppressed", signal_probability=None):
+                        conviction_provenance="suppressed", signal_probability=None,
+                        effective_thresholds=None):
     """Capture every decision-time input needed to audit a conviction label."""
     config_hash = file_sha256(CONFIG_PATH)
     metrics_hash = file_sha256(METRICS_CACHE_PATH)
     runtime_json = json.dumps(APP_CONFIG, sort_keys=True, separators=(",", ":"), default=str)
     runtime_hash = hashlib.sha256(runtime_json.encode("utf-8")).hexdigest()
     artifact_id = f"metrics:{metrics_hash[:16]}" if metrics_hash != "missing" else "unknown"
+    thresholds = effective_thresholds or {
+        "hike": APP_CONFIG.get(f"{prefix}_HIKE_THRESHOLD_CENTS", 1.0),
+        "drop": APP_CONFIG.get(f"{prefix}_DROP_THRESHOLD_CENTS", -1.0),
+        "lean_hike": APP_CONFIG.get(f"{prefix}_LEAN_HIKE_CENTS", 0.5),
+        "lean_drop": APP_CONFIG.get(f"{prefix}_LEAN_DROP_CENTS", -0.5),
+    }
 
     return {
         "log_schema_version": "3",
@@ -403,10 +410,10 @@ def decision_provenance(prefix, signal_price, baseline_price, *, nymex_daily_std
             if signal_probability is not None else conviction_label
         ),
         "conviction_provenance": conviction_provenance,
-        "hike_threshold_used": f"{APP_CONFIG.get(f'{prefix}_HIKE_THRESHOLD_CENTS', 1.0):.4f}",
-        "drop_threshold_used": f"{APP_CONFIG.get(f'{prefix}_DROP_THRESHOLD_CENTS', -1.0):.4f}",
-        "lean_hike_threshold_used": f"{APP_CONFIG.get(f'{prefix}_LEAN_HIKE_CENTS', 0.5):.4f}",
-        "lean_drop_threshold_used": f"{APP_CONFIG.get(f'{prefix}_LEAN_DROP_CENTS', -0.5):.4f}",
+        "hike_threshold_used": f"{float(thresholds['hike']):.4f}",
+        "drop_threshold_used": f"{float(thresholds['drop']):.4f}",
+        "lean_hike_threshold_used": f"{float(thresholds['lean_hike']):.4f}",
+        "lean_drop_threshold_used": f"{float(thresholds['lean_drop']):.4f}",
         "signal_price_used": f"{float(signal_price):.4f}",
         "baseline_price_used": f"{float(baseline_price):.4f}",
         "runtime_config_hash": runtime_hash,
@@ -971,6 +978,12 @@ def build_rack_signal(prefix, data, now):
             z_score=z_score, conviction_label=conviction,
             conviction_provenance="passthrough_model_v2",
             signal_probability=signal_probability,
+            effective_thresholds={
+                "hike": hike_thresh,
+                "drop": drop_thresh,
+                "lean_hike": lean_hike,
+                "lean_drop": lean_drop,
+            },
         )
         append_prediction_log(prefix, now, direction, change_cents, thresh, provenance, decision)
     except Exception as e:

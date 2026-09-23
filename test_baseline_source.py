@@ -165,6 +165,12 @@ class TestThresholdWidening:
         signal = self._signal("schwab_close_price", -(fallback + 5.0), tmp_path)
         assert signal["action"] == "WAIT"
 
+        with open(tmp_path / "prediction_log.csv", newline="") as handle:
+            row = next(csv.DictReader(handle))
+        assert float(row["threshold_used"]) == pytest.approx(-fallback)
+        assert float(row["drop_threshold_used"]) == pytest.approx(-fallback)
+        assert float(row["lean_drop_threshold_used"]) == pytest.approx(-fallback)
+
     def test_lean_band_never_inverts_after_widening(self, tmp_path):
         for source in ("settlement_provenance_verified", "schwab_close_price", "unknown"):
             signal = self._signal(source, 0.0, tmp_path)

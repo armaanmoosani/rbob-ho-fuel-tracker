@@ -716,27 +716,35 @@ def ensure_trailing_newline(file_path):
         print(f"Warning: Failed to ensure trailing newline for {file_path}: {e}")
 
 
+def target_date_candidates(now_local, existing_dates):
+    """Return recent missing rack dates in the order they should be recovered."""
+    today = now_local.date()
+    yesterday = today - timedelta(days=1)
+    candidates = []
+
+    # Always recover a missing prior weekday first. GitHub scheduled jobs can
+    # start hours late, so execution time cannot decide whether yesterday's
+    # late-arriving price email still belongs to yesterday.
+    if yesterday.weekday() < 5 and yesterday.isoformat() not in existing_dates:
+        candidates.append(yesterday.isoformat())
+
+    # Before noon, today's rack email is not expected yet. At/after noon, also
+    # try today so a missing holiday email does not block the current session.
+    if (now_local.hour >= 12 and today.weekday() < 5
+            and today.isoformat() not in existing_dates):
+        candidates.append(today.isoformat())
+    return candidates
+
+
 def main():
     print("Starting price ingest...")
     git_pull_rebase()
     validate_data.validate_all(DATA_DIR)
     
-    # Calculate target date based on Chicago timezone local hour
     now_local = datetime.now(TZ)
-    if now_local.hour < 12:
-        target_date_str = (now_local - timedelta(days=1)).date().isoformat()
-    else:
-        target_date_str = now_local.date().isoformat()
-        
-    print(f"Target date determined: {target_date_str} (local hour: {now_local.hour})")
-    
-    # Check if target date is a weekend (5 = Saturday, 6 = Sunday)
-    target_dt = datetime.fromisoformat(target_date_str)
-    if target_dt.weekday() in (5, 6):
-        print(f"Target date {target_date_str} is weekend. Graves Oil is closed. Exiting silently.")
-        sys.exit(0)
-        
-    # Read CSV to check for existing date (idempotency check)
+
+    # Read CSV before choosing a target. Selection is based on missing data,
+    # not only wall-clock time, because scheduled Actions may run hours late.
     existing_dates = set()
     if os.path.exists(CSV_PATH):
         with open(CSV_PATH, "r") as f:
@@ -745,14 +753,21 @@ def main():
                 if parts and parts[0]:
                     existing_dates.add(parts[0])
                     
-    if target_date_str in existing_dates:
-        print(f"Prices for {target_date_str} already ingested. Exiting silently.")
+    candidates = target_date_candidates(now_local, existing_dates)
+    if not candidates:
+        print("No eligible missing rack-price date. Exiting silently.")
         sys.exit(0)
-        
-    # Query inbox for target date's email
-    date_str, prices = check_inbox_for_prices(target_date_str)
+
+    print(f"Target date candidates: {', '.join(candidates)} (local hour: {now_local.hour})")
+
+    date_str, prices = None, None
+    for target_date_str in candidates:
+        date_str, prices = check_inbox_for_prices(target_date_str)
+        if prices:
+            break
     
     if not prices:
+        target_date_str = candidates[0]
         # Determine retry vs. warning behavior
         current_hour = now_local.hour
         is_final_check = (current_hour == 0) or (current_hour < 4) or (current_hour in (8, 9))

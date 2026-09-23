@@ -12,6 +12,24 @@ sys.path.append(os.path.dirname(__file__))
 import ingest_prices
 
 class TestRetryAndTargetDateLogic(unittest.TestCase):
+
+    def test_delayed_noon_run_recovers_missing_previous_weekday_first(self):
+        tz = pytz.timezone('America/Chicago')
+        delayed = tz.localize(datetime(2026, 9, 23, 12, 38, 0))
+
+        candidates = ingest_prices.target_date_candidates(
+            delayed, {"2026-09-21"}
+        )
+
+        self.assertEqual(candidates, ["2026-09-22", "2026-09-23"])
+
+    def test_delayed_run_does_not_let_missing_weekend_block_today(self):
+        tz = pytz.timezone('America/Chicago')
+        monday_afternoon = tz.localize(datetime(2026, 9, 28, 12, 38, 0))
+
+        candidates = ingest_prices.target_date_candidates(monday_afternoon, set())
+
+        self.assertEqual(candidates, ["2026-09-28"])
     
     @patch('ingest_prices.datetime')
     def test_target_date_calculation_daytime(self, mock_datetime):
