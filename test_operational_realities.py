@@ -667,6 +667,31 @@ class TestPointInTimeCalibrationArtifacts(unittest.TestCase):
             self.assertEqual(written["calibration"], artifact["calibration"])
             build.assert_not_called()
 
+    def test_corrected_history_is_deferred_without_rewriting_live_artifact(self):
+        history = self._history()
+        session = backtest._next_nymex_business_session(history["date"].iloc[-1])
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            backtest, "CALIBRATION_RUNS_PATH", os.path.join(temp_dir, "runs.jsonl")
+        ):
+            original, created = backtest.write_shadow_calibration_artifact(
+                history, self._cfg())
+            self.assertTrue(created)
+
+            corrected = history.copy()
+            corrected.loc[corrected.index[-1], "nymex_rb"] += 0.01
+            replacement, created = backtest.write_shadow_calibration_artifact(
+                corrected, self._cfg())
+
+            self.assertTrue(created)
+            self.assertEqual(original["effective_session"], session)
+            self.assertEqual(
+                replacement["effective_session"],
+                backtest._next_nymex_business_session(session),
+            )
+            self.assertEqual(replacement["prior_artifact_id"], original["artifact_id"])
+            self.assertNotEqual(replacement["source_history_hash"],
+                                original["source_history_hash"])
+
     def test_calibration_refuses_history_outside_the_verified_era(self):
         """The era gate still bites when a boundary is in force.
 
@@ -678,4 +703,3 @@ class TestPointInTimeCalibrationArtifacts(unittest.TestCase):
         with patch.object(alignment, "CALIBRATION_ERA_START", "2023-03-06"):
             with self.assertRaises(ValueError):
                 backtest._eligible_training_history(old_rows, None)
-

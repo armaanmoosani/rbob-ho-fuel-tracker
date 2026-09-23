@@ -335,6 +335,50 @@ def read_daily_settlement(target_date_str):
     return None
 
 
+def read_live_prediction_settlement(target_date_str):
+    """Recover the exact contract-verified 1:30 snapshots logged live."""
+    log_path = os.path.join(os.path.dirname(CSV_PATH), "prediction_log.csv")
+    if not os.path.exists(log_path):
+        return None
+
+    rows = {}
+    try:
+        with open(log_path, newline="") as f:
+            for row in csv.DictReader(f):
+                if not str(row.get("timestamp", "")).startswith(target_date_str):
+                    continue
+                commodity = row.get("commodity")
+                contract = row.get("signal_contract", "")
+                if (commodity not in ("RB", "HO")
+                        or row.get("prediction_source") != "live"
+                        or row.get("contract_provenance_status") != "verified"
+                        or not contract or contract == "unknown"):
+                    continue
+                price = float(row.get("signal_price_used", ""))
+                if not math.isfinite(price) or price <= 0:
+                    continue
+                rows[commodity] = (row, price)
+    except (OSError, ValueError, csv.Error) as exc:
+        print(f"Could not recover settlement from prediction log: {mask_sensitive_text(exc)}")
+        return None
+
+    if set(rows) != {"RB", "HO"}:
+        return None
+    rb_row, rb_price = rows["RB"]
+    ho_row, ho_price = rows["HO"]
+    return {
+        "date": target_date_str,
+        "rbob_settlement": round(rb_price, 4),
+        "heating_oil_settlement": round(ho_price, 4),
+        "source": "live_prediction_snapshot",
+        "captured_at": rb_row.get("settlement_captured_at", ""),
+        "rbob_contract": rb_row["signal_contract"],
+        "heating_oil_contract": ho_row["signal_contract"],
+        "rbob_source": rb_row.get("settlement_source", "live_prediction_snapshot"),
+        "heating_oil_source": ho_row.get("settlement_source", "live_prediction_snapshot"),
+    }
+
+
 def append_settlement_provenance(ds, target_date_str):
     """Persist the contract identity for each settlement archived in graves_history."""
     source = ds.get("source", "daily_settlement")
@@ -796,6 +840,11 @@ def main():
     
     # Get settlement data
     ds = read_daily_settlement(date_str)
+    if not ds:
+        ds = read_live_prediction_settlement(date_str)
+        if ds:
+            print(f"Recovered verified live snapshots: RB={ds['rbob_settlement']}, "
+                  f"HO={ds['heating_oil_settlement']}")
     if not ds:
         print(f"daily_settlement.json missing or stale for {date_str}. Trying GitHub repository variables...")
         ds = get_github_settlement_snapshots(date_str)

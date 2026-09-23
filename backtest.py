@@ -479,11 +479,22 @@ def write_shadow_calibration_artifact(df, cfg):
         if (existing["training_end"] != training_df["date"].iloc[-1].date().isoformat()
                 or existing["source_row_count"] != len(training_df)
                 or existing["source_history_hash"] != _history_hash(training_df)):
-            raise ValueError(
-                f"Source history no longer matches calibration artifact for {effective_session}.")
-        print(f"Verified existing shadow calibration artifact {existing['artifact_id'][:12]} "
-              f"for {effective_session} (training through {existing['training_end']}).")
-        return existing, False
+            # The existing artifact remains the immutable record of what was
+            # actually available for that decision session. A later authorised
+            # source-data correction becomes eligible on the next business
+            # session; it must never rewrite history retroactively.
+            corrected_session = _next_nymex_business_session(effective_session)
+            if any(item["effective_session"] >= corrected_session for item in artifacts):
+                raise ValueError(
+                    "Corrected source history conflicts with a later calibration artifact.")
+            print(f"Source history was corrected after artifact "
+                  f"{existing['artifact_id'][:12]} became effective; preserving it and "
+                  f"publishing the correction for {corrected_session}.")
+            effective_session = corrected_session
+        else:
+            print(f"Verified existing shadow calibration artifact {existing['artifact_id'][:12]} "
+                  f"for {effective_session} (training through {existing['training_end']}).")
+            return existing, False
 
     prior = artifacts[-1] if artifacts else None
     artifact = build_shadow_calibration_artifact(
@@ -550,8 +561,11 @@ def main():
                       f"savings {fold['total_savings']:+.1f}c")
         cfg["LAG_DAYS"] = 0
 
+    artifact, _ = write_shadow_calibration_artifact(df, calibration_seed_cfg)
+    # A source correction discovered after today's artifact became effective
+    # is intentionally deferred to the artifact's next-session date.
+    effective_session = artifact["effective_session"]
     save_metrics_cache(cfg, effective_session, source_history_hash)
-    write_shadow_calibration_artifact(df, calibration_seed_cfg)
     validate_data.validate_calibration_artifacts(CALIBRATION_RUNS_PATH)
     validate_data.validate_and_update_hashes(DATA_DIR)
 

@@ -2,6 +2,7 @@ import os
 os.environ['GRAVES_EMAIL'] = 'mock_graves@example.com'
 os.environ['GRAVES_APP_PASSWORD'] = 'mock_graves_pass'
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch, MagicMock, mock_open
 from datetime import datetime
@@ -12,6 +13,29 @@ sys.path.append(os.path.dirname(__file__))
 import ingest_prices
 
 class TestRetryAndTargetDateLogic(unittest.TestCase):
+
+    def test_verified_live_prediction_recovers_exact_settlement_snapshot(self):
+        header = (
+            "timestamp,commodity,prediction_source,signal_contract,settlement_source,"
+            "settlement_captured_at,contract_provenance_status,signal_price_used\n"
+        )
+        rows = (
+            "2026-09-22T14:35:00-05:00,RB,live,/RBV26,schwab,"
+            "2026-09-22T13:30:00-05:00,verified,3.4947\n"
+            "2026-09-22T14:35:00-05:00,HO,live,/HOV26,schwab,"
+            "2026-09-22T13:30:00-05:00,verified,4.9486\n"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            history_path = os.path.join(temp_dir, "graves_history.csv")
+            with open(os.path.join(temp_dir, "prediction_log.csv"), "w") as handle:
+                handle.write(header + rows)
+            with patch("ingest_prices.CSV_PATH", history_path):
+                settlement = ingest_prices.read_live_prediction_settlement("2026-09-22")
+
+        self.assertEqual(settlement["rbob_settlement"], 3.4947)
+        self.assertEqual(settlement["heating_oil_settlement"], 4.9486)
+        self.assertEqual(settlement["rbob_contract"], "/RBV26")
+        self.assertEqual(settlement["heating_oil_contract"], "/HOV26")
 
     def test_delayed_noon_run_recovers_missing_previous_weekday_first(self):
         tz = pytz.timezone('America/Chicago')
