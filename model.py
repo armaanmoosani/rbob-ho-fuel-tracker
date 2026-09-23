@@ -227,6 +227,110 @@ def apply_noise_floor(hike, drop, noise_floor):
     return max(float(hike), floor), min(float(drop), -floor)
 
 
+def economic_decision_value(action, expected_rack_move_cents, gallons,
+                            buy_cost_cents=0.0, wait_cost_cents=0.0):
+    """Expected procurement value after action-specific operating costs.
+
+    ``expected_rack_move_cents`` is tomorrow's rack minus today's rack.  Buying
+    today captures a rise; waiting captures a fall.  Dispatch/carrying costs
+    and deferral/stockout costs are deliberately separate because treating
+    them as symmetric would encode the wrong physical decision.
+
+    Costs are explicit policy inputs, never estimated from price history.  A
+    zero default therefore means "unknown/not configured", not "free".  It
+    preserves the existing probability policy while making the economic gate
+    operational as soon as the owner supplies real costs.
+    """
+    try:
+        expected = float(expected_rack_move_cents)
+        volume = float(gallons)
+        buy_cost = float(buy_cost_cents)
+        wait_cost = float(wait_cost_cents)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("economic decision inputs must be numeric") from exc
+    if not all(np.isfinite(v) for v in (expected, volume, buy_cost, wait_cost)):
+        raise ValueError("economic decision inputs must be finite")
+    if volume <= 0:
+        raise ValueError("gallons must be positive")
+    if buy_cost < 0 or wait_cost < 0:
+        raise ValueError("action costs cannot be negative")
+
+    if action in ("BUY_NOW", "LEAN_BUY"):
+        gross = expected
+        cost = buy_cost
+    elif action in ("WAIT", "LEAN_WAIT"):
+        gross = -expected
+        cost = wait_cost
+    else:
+        gross = 0.0
+        cost = 0.0
+    net = gross - cost
+    return {
+        "gross_edge_cents": gross,
+        "action_cost_cents": cost,
+        "net_edge_cents": net,
+        "net_value_dollars": net / 100.0 * volume,
+        "economically_positive": net > 0.0,
+    }
+
+
+def threshold_uncertainty(delta_nymex, delta_rack, target_confidence,
+                          noise_floor, bootstrap=500, block_length=5,
+                          seed=20260923):
+    """Moving-block bootstrap interval for both decision thresholds.
+
+    Daily residuals are not assumed independent.  Resampling short contiguous
+    blocks preserves local volatility clustering while refitting both the
+    pass-through slope and empirical residual distribution on every draw.
+    The returned interval describes calibration uncertainty, not a confidence
+    interval for today's realised rack move.
+    """
+    x = np.asarray(delta_nymex, dtype=float)
+    y = np.asarray(delta_rack, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    x, y = x[mask], y[mask]
+    n = int(x.size)
+    if n < MIN_FIT_ROWS:
+        raise ModelFitError(f"only {n} usable pairs; need {MIN_FIT_ROWS}")
+    if bootstrap < 100:
+        raise ValueError("bootstrap must be at least 100")
+    if not 1 <= block_length <= n:
+        raise ValueError("block_length must be between 1 and the sample size")
+
+    rng = np.random.default_rng(seed)
+    blocks_needed = int(np.ceil(n / block_length))
+    max_start = n - block_length
+    hikes, drops = [], []
+    for _ in range(int(bootstrap)):
+        starts = rng.integers(0, max_start + 1, size=blocks_needed)
+        indices = np.concatenate([
+            np.arange(start, start + block_length) for start in starts
+        ])[:n]
+        try:
+            fit = fit_passthrough(x[indices], y[indices])
+            hike, drop = apply_noise_floor(
+                *fit.threshold_for_confidence(target_confidence), noise_floor)
+        except ModelFitError:
+            continue
+        hikes.append(hike)
+        drops.append(drop)
+
+    minimum_success = max(80, int(bootstrap * 0.8))
+    if len(hikes) < minimum_success:
+        raise ModelFitError(
+            f"only {len(hikes)} of {bootstrap} bootstrap refits succeeded")
+    hike_low, hike_high = np.percentile(hikes, [2.5, 97.5])
+    drop_low, drop_high = np.percentile(drops, [2.5, 97.5])
+    return {
+        "hike_low": float(hike_low),
+        "hike_high": float(hike_high),
+        "drop_low": float(drop_low),
+        "drop_high": float(drop_high),
+        "bootstrap": len(hikes),
+        "block_length": int(block_length),
+    }
+
+
 def savings_from_signals(delta_nymex, delta_rack, hike, drop):
     """Per-alert procurement payoff, in cents per gallon.
 

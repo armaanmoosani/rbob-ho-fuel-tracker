@@ -46,6 +46,10 @@ import re
 import csv
 import hashlib
 import model
+from calibration_artifacts import (
+    CalibrationArtifactUnavailable,
+    artifact_for_session,
+)
 
 def mask_recipient(address):
     if not address:
@@ -140,6 +144,7 @@ TRUCK_GALLONS = 8500   # Standard truck load for dollar-value risk calculations
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 METRICS_CACHE_PATH = os.path.join(DATA_DIR, "metrics_cache.json")
+CALIBRATION_RUNS_PATH = os.path.join(DATA_DIR, "calibration_runs.jsonl")
 PREDICTION_LOG_COLUMNS = [
     "timestamp", "commodity", "predicted_direction", "nymex_move_cents",
     "lag_used", "window_used", "threshold_used", "actual_next_day_move_cents",
@@ -164,6 +169,11 @@ DEFAULT_APP_CONFIG = {
     "RB_LEAN_DROP_CENTS": -0.5,
     "HO_LEAN_HIKE_CENTS": 0.5,
     "HO_LEAN_DROP_CENTS": -0.5,
+    "RB_BUY_INCREMENTAL_COST_CENTS_PER_GAL": 0.0,
+    "RB_WAIT_INCREMENTAL_COST_CENTS_PER_GAL": 0.0,
+    "HO_BUY_INCREMENTAL_COST_CENTS_PER_GAL": 0.0,
+    "HO_WAIT_INCREMENTAL_COST_CENTS_PER_GAL": 0.0,
+    "TRUCK_GALLONS": TRUCK_GALLONS,
     "LAG_DAYS": 0,
 }
 
@@ -191,6 +201,44 @@ def load_runtime_config(config_path=CONFIG_PATH, metrics_cache_path=METRICS_CACH
 
 
 APP_CONFIG, CONFIG_CORRUPT = load_runtime_config()
+
+
+def activate_calibration_for_session(now, artifact_path=CALIBRATION_RUNS_PATH):
+    """Use only calibration that was eligible for this trading session.
+
+    Nightly calibration can publish a future-dated cache when an immutable
+    artifact already occupies the next session.  Serving that cache early
+    breaks point-in-time provenance.  In that case this overlays the exact
+    session artifact while leaving operator-only config keys (not present in
+    artifacts) untouched.
+    """
+    session = get_session_date_str(now)
+    cache_session = str(APP_CONFIG.get("CALIBRATION_EFFECTIVE_SESSION", ""))[:10]
+    if cache_session and cache_session <= session:
+        return cache_session
+    try:
+        artifact = artifact_for_session(artifact_path, session)
+    except (CalibrationArtifactUnavailable, OSError, ValueError) as exc:
+        APP_CONFIG["_CALIBRATION_SESSION_ERROR"] = (
+            f"No immutable calibration artifact is available for {session}: {exc}")
+        print(f"CRITICAL: {APP_CONFIG['_CALIBRATION_SESSION_ERROR']}")
+        return None
+
+    policy_suffixes = (
+        "_BUY_INCREMENTAL_COST_CENTS_PER_GAL",
+        "_WAIT_INCREMENTAL_COST_CENTS_PER_GAL",
+    )
+    for key in list(APP_CONFIG):
+        if key.startswith(("RB_", "HO_")) and not key.endswith(policy_suffixes):
+            APP_CONFIG.pop(key)
+    APP_CONFIG.update(artifact["calibration"])
+    APP_CONFIG["CALIBRATION_EFFECTIVE_SESSION"] = artifact["effective_session"]
+    APP_CONFIG["CALIBRATION_METHOD_VERSION"] = artifact["candidate_grid_version"]
+    APP_CONFIG["CALIBRATION_ARTIFACT_ID"] = artifact["artifact_id"]
+    APP_CONFIG.pop("_CALIBRATION_SESSION_ERROR", None)
+    print(f"Activated point-in-time calibration {artifact['artifact_id'][:12]} "
+          f"for {session}; future cache is effective {cache_session}.")
+    return artifact["effective_session"]
 
 def get_session_start(dt):
     if dt.hour >= 17:
@@ -391,7 +439,9 @@ def decision_provenance(prefix, signal_price, baseline_price, *, nymex_daily_std
     metrics_hash = file_sha256(METRICS_CACHE_PATH)
     runtime_json = json.dumps(APP_CONFIG, sort_keys=True, separators=(",", ":"), default=str)
     runtime_hash = hashlib.sha256(runtime_json.encode("utf-8")).hexdigest()
-    artifact_id = f"metrics:{metrics_hash[:16]}" if metrics_hash != "missing" else "unknown"
+    artifact_id = APP_CONFIG.get("CALIBRATION_ARTIFACT_ID")
+    if not artifact_id:
+        artifact_id = f"metrics:{metrics_hash[:16]}" if metrics_hash != "missing" else "unknown"
     thresholds = effective_thresholds or {
         "hike": APP_CONFIG.get(f"{prefix}_HIKE_THRESHOLD_CENTS", 1.0),
         "drop": APP_CONFIG.get(f"{prefix}_DROP_THRESHOLD_CENTS", -1.0),
@@ -584,7 +634,26 @@ def describe_confidence(probability):
     return f"Low confidence ({probability:.0%})"
 
 
-def build_risk_note(prefix, action, probability, expected_move):
+def threshold_stability(prefix, action, change_cents):
+    """Classify whether an alert survives the threshold bootstrap interval."""
+    if action == "BUY_NOW":
+        boundary = APP_CONFIG.get(f"{prefix}_threshold_ci_hike_high")
+        stable = boundary is not None and change_cents >= float(boundary)
+    elif action == "WAIT":
+        boundary = APP_CONFIG.get(f"{prefix}_threshold_ci_drop_low")
+        stable = boundary is not None and change_cents <= float(boundary)
+    else:
+        return None
+    if boundary is None:
+        return None
+    return {
+        "stable": bool(stable),
+        "conservative_boundary": float(boundary),
+    }
+
+
+def build_risk_note(prefix, action, probability, expected_move, economic=None,
+                    stability=None):
     """Quantitative context for one verdict, entirely derived from the cache."""
     parts = []
 
@@ -593,6 +662,29 @@ def build_risk_note(prefix, action, probability, expected_move):
         parts.append(
             f"Model confidence: {probability:.0%} that the rack will {direction} tonight"
             + (f", expected move {expected_move:+.2f}¢/gal." if expected_move is not None else ".")
+        )
+
+    if economic is not None:
+        cost = economic["action_cost_cents"]
+        parts.append(
+            f"Economic edge: {economic['gross_edge_cents']:+.2f}¢/gal expected gross, "
+            f"{cost:.2f}¢/gal configured action cost, "
+            f"{economic['net_edge_cents']:+.2f}¢/gal expected net "
+            f"({economic['net_value_dollars']:+,.0f} per configured truck)."
+        )
+        if cost == 0:
+            parts.append(
+                "No operating cost is configured for this action, so net value still "
+                "excludes dispatch, carrying, stockout, and expedited-delivery costs."
+            )
+
+    if stability is not None:
+        direction = "above" if action == "BUY_NOW" else "below"
+        status = "stable" if stability["stable"] else "threshold-sensitive"
+        parts.append(
+            f"Calibration stability: {status}; the move is "
+            f"{direction} the conservative 95% refit boundary of "
+            f"{stability['conservative_boundary']:+.2f}¢/gal."
         )
 
     # Alert-performance context belongs on an alert.  Quoting it on a NO_EDGE
@@ -841,6 +933,24 @@ def build_rack_signal(prefix, data, now):
 
 
     # Load thresholds and the fitted pass-through model from the metrics cache.
+    calibration_session_error = APP_CONFIG.get("_CALIBRATION_SESSION_ERROR")
+    if calibration_session_error:
+        return {
+            "action": "NO_EDGE",
+            "label": "Calibration unavailable",
+            "color": "#64748b",
+            "text": (f"{name}: NO EDGE. The point-in-time calibration for this "
+                     "session is unavailable; alert suppressed."),
+            "change_cents": change_cents,
+            "basis": basis,
+            "signal_price": signal_price,
+            "threshold_cents": hike_thresh,
+            "z_score": 0.0,
+            "conviction": "Confidence unavailable",
+            "risk_text": calibration_session_error,
+            "contract_provenance": provenance,
+        }
+
     hike_thresh = APP_CONFIG.get(f"{prefix}_HIKE_THRESHOLD_CENTS", 1.0)
     drop_thresh = APP_CONFIG.get(f"{prefix}_DROP_THRESHOLD_CENTS", -1.0)
     lean_hike = APP_CONFIG.get(f"{prefix}_LEAN_HIKE_CENTS", 0.5)
@@ -934,6 +1044,28 @@ def build_rack_signal(prefix, data, now):
         color = "#64748b"
         instruction = "Do not let this futures move alone drive the truck decision."
 
+    modeled_action = action
+    economic = None
+    stability = threshold_stability(prefix, action, change_cents)
+    if action in ("BUY_NOW", "WAIT", "LEAN_BUY", "LEAN_WAIT"):
+        buy_cost = APP_CONFIG.get(
+            f"{prefix}_BUY_INCREMENTAL_COST_CENTS_PER_GAL", 0.0)
+        wait_cost = APP_CONFIG.get(
+            f"{prefix}_WAIT_INCREMENTAL_COST_CENTS_PER_GAL", 0.0)
+        truck_gallons = APP_CONFIG.get("TRUCK_GALLONS", TRUCK_GALLONS)
+        economic = model.economic_decision_value(
+            action, expected_move, truck_gallons,
+            buy_cost_cents=buy_cost, wait_cost_cents=wait_cost)
+        if not economic["economically_positive"]:
+            action = "NO_EDGE"
+            label = "No economic edge"
+            color = "#64748b"
+            instruction = (
+                f"The {modeled_action.replace('_', ' ').lower()} price signal is "
+                "not expected to cover the configured operating cost; do not use "
+                "futures alone to change the truck plan."
+            )
+
     # Only withhold a recommendation when the model itself is unsure.  The
     # threshold is already placed at TARGET_SIGNAL_CONFIDENCE, so a triggered
     # alert below that is a sign the cache and the thresholds disagree.
@@ -948,7 +1080,9 @@ def build_rack_signal(prefix, data, now):
     # calibration run.  Nothing here is a hardcoded historical claim: the
     # previous version pasted a "53%-73%" range taken from a README table that
     # no script in the repository could reproduce.
-    risk_text = build_risk_note(prefix, action, signal_probability, expected_move)
+    risk_text = build_risk_note(
+        prefix, modeled_action, signal_probability, expected_move,
+        economic=economic, stability=stability)
 
     decoupling_warn = get_decoupling_warning(prefix, now)
     if decoupling_warn:
@@ -1002,6 +1136,9 @@ def build_rack_signal(prefix, data, now):
         "conviction": conviction,
         "risk_text": risk_text,
         "contract_provenance": provenance,
+        "expected_rack_move_cents": expected_move,
+        "economic_value": economic,
+        "threshold_stability": stability,
     }
 
 def attach_rack_signals(all_data, now):
@@ -1713,12 +1850,13 @@ def fetch_all_commodities(now, access_token, alert_state):
 def main():
     # Assert Chicago timezone is correctly recognized (Issue 10.1)
     assert TZ.zone == 'America/Chicago', "TimeZone mismatch: America/Chicago expected."
-    
+
+    now = datetime.now(TZ)
+    activate_calibration_for_session(now)
     dispatch_rate = APP_CONFIG.get("DISPATCH_SAME_DAY_RATE", 0.50)
     print(f"System initialized. Active DISPATCH_SAME_DAY_RATE: {dispatch_rate:.2f} ({dispatch_rate * 100:.0f}%)")
     
     start_time = datetime.now(timezone.utc)
-    now = datetime.now(TZ)
     
     if is_holiday(now):
         print(f"Today is a holiday ({now.date()}). Skipping price checks and alerts.")

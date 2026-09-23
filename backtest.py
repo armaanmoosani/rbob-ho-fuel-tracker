@@ -51,7 +51,7 @@ CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 METRICS_CACHE_PATH = os.path.join(DATA_DIR, "metrics_cache.json")
 CALIBRATION_RUNS_PATH = os.path.join(DATA_DIR, "calibration_runs.jsonl")
 CALIBRATION_PURGE_ROWS = 1
-CALIBRATION_METHOD_VERSION = "v2-passthrough-confidence"
+CALIBRATION_METHOD_VERSION = "v3-passthrough-economic-uncertainty"
 
 # Evaluation-only walk-forward geometry.  No parameter is chosen from these
 # folds.  Widened after the re-dating migration tripled the usable history:
@@ -80,6 +80,10 @@ DEFAULTS = {
     # Floor applied at decision time when the baseline is NOT the calibration
     # source -- the old universal value, sized to the p95 of that mismatch.
     "FALLBACK_NOISE_FLOOR_CENTS": 1.2,
+    # Moving-block bootstrap settings for threshold stability intervals.  Five
+    # sessions retains one trading week's local volatility structure.
+    "THRESHOLD_BOOTSTRAP_SAMPLES": 500,
+    "THRESHOLD_BOOTSTRAP_BLOCK_LENGTH": 5,
     # Rows used for the final fit.  Raised from 180 after the re-dating
     # migration: measured on an identical evaluation block, lengthening the
     # window is the one change that improved calibration out of sample.
@@ -120,19 +124,33 @@ SUPERSEDED_CACHE_KEY_SUFFIXES = (
     "_opt_Hp", "_opt_Dp",
 )
 
+# Operator economics belong to config.json, not the generated metrics cache.
+# Copying them into the cache would make the older generated value override a
+# later config edit because runtime configuration overlays cache after config.
+POLICY_ONLY_CACHE_SUFFIXES = (
+    "_BUY_INCREMENTAL_COST_CENTS_PER_GAL",
+    "_WAIT_INCREMENTAL_COST_CENTS_PER_GAL",
+)
+
 
 def _is_superseded(key):
     return any(key.endswith(suffix) for suffix in SUPERSEDED_CACHE_KEY_SUFFIXES)
 
 
-def save_metrics_cache(cfg, effective_session=None, source_history_hash=None):
+def _is_policy_only(key):
+    return any(key.endswith(suffix) for suffix in POLICY_ONLY_CACHE_SUFFIXES)
+
+
+def save_metrics_cache(cfg, effective_session=None, source_history_hash=None,
+                       calibration_artifact_id=None):
     output_keys = ["ROLLING_WINDOW_DAYS", "LAG_DAYS",
                    "TARGET_SIGNAL_CONFIDENCE", "TARGET_LEAN_CONFIDENCE",
                    "SNAPSHOT_NOISE_FLOOR_CENTS", "FALLBACK_NOISE_FLOOR_CENTS",
+                   "THRESHOLD_BOOTSTRAP_SAMPLES", "THRESHOLD_BOOTSTRAP_BLOCK_LENGTH",
                    "CALIBRATION_ERA_START"]
     output_keys.extend(k for k in cfg if k.startswith(("RB_", "HO_")))
     cache_data = {k: cfg[k] for k in dict.fromkeys(output_keys)
-                  if k in cfg and not _is_superseded(k)}
+                  if k in cfg and not _is_superseded(k) and not _is_policy_only(k)}
     cache_data["CALIBRATION_EFFECTIVE_SESSION"] = (
         str(effective_session)[:10] if effective_session else
         datetime.now(pytz.timezone("America/Chicago")).date().isoformat()
@@ -140,6 +158,8 @@ def save_metrics_cache(cfg, effective_session=None, source_history_hash=None):
     cache_data["CALIBRATION_METHOD_VERSION"] = CALIBRATION_METHOD_VERSION
     if source_history_hash:
         cache_data["CALIBRATION_SOURCE_HISTORY_HASH"] = source_history_hash
+    if calibration_artifact_id:
+        cache_data["CALIBRATION_ARTIFACT_ID"] = calibration_artifact_id
 
     tmp_path = METRICS_CACHE_PATH + ".tmp"
     with open(tmp_path, "w") as handle:
@@ -301,6 +321,13 @@ def calibrate(df, prefix, cfg):
     lean_hike = min(lean_hike, hike)
     lean_drop = max(lean_drop, drop)
 
+    threshold_ci = model.threshold_uncertainty(
+        final["delta_nymex"], final["delta_rack"], target, floor,
+        bootstrap=int(cfg["THRESHOLD_BOOTSTRAP_SAMPLES"]),
+        block_length=int(cfg["THRESHOLD_BOOTSTRAP_BLOCK_LENGTH"]),
+        seed=20260923 if prefix == "RB" else 20260924,
+    )
+
     in_window = model.summarize(final["delta_nymex"], final["delta_rack"], hike, drop)
     # Tail risk is estimated over the whole alignment-verified era rather than
     # the fit window.  A 180-row window leaves under 20 WAIT observations for
@@ -315,6 +342,10 @@ def calibrate(df, prefix, cfg):
     cfg[f"{prefix}_LEAN_DROP_CENTS"] = round(lean_drop, 2)
     cfg[f"{prefix}_window_days"] = window
     cfg[f"{prefix}_nymex_daily_std"] = round(float(final["delta_nymex"].std(ddof=1)), 4)
+    for key in ("hike_low", "hike_high", "drop_low", "drop_high"):
+        cfg[f"{prefix}_threshold_ci_{key}"] = round(threshold_ci[key], 4)
+    cfg[f"{prefix}_threshold_ci_bootstrap"] = threshold_ci["bootstrap"]
+    cfg[f"{prefix}_threshold_ci_block_length"] = threshold_ci["block_length"]
 
     # Out-of-sample figures.  These are the only performance numbers any
     # user-facing surface is allowed to quote.
@@ -348,6 +379,8 @@ def calibrate(df, prefix, cfg):
         cfg[f"{prefix}_wait_cvar_status"] = "ok"
 
     message = (f"b={fit.slope:.3f} R2={fit.r2:.3f} hike={hike:+.2f}c drop={drop:+.2f}c "
+               f"hike95=[{threshold_ci['hike_low']:+.2f},{threshold_ci['hike_high']:+.2f}] "
+               f"drop95=[{threshold_ci['drop_low']:+.2f},{threshold_ci['drop_high']:+.2f}] "
                f"OOS prec={evaluation['precision']:.1%} on {evaluation['alerts']} alerts")
     return cfg, message, evaluation
 
@@ -374,8 +407,10 @@ def _history_hash(df):
 def _calibration_payload(cfg):
     keys = ["ROLLING_WINDOW_DAYS", "LAG_DAYS", "TARGET_SIGNAL_CONFIDENCE",
             "TARGET_LEAN_CONFIDENCE", "SNAPSHOT_NOISE_FLOOR_CENTS",
-            "FALLBACK_NOISE_FLOOR_CENTS", "CALIBRATION_ERA_START"]
-    keys.extend(key for key in cfg if key.startswith(("RB_", "HO_")))
+            "FALLBACK_NOISE_FLOOR_CENTS", "THRESHOLD_BOOTSTRAP_SAMPLES",
+            "THRESHOLD_BOOTSTRAP_BLOCK_LENGTH", "CALIBRATION_ERA_START"]
+    keys.extend(key for key in cfg
+                if key.startswith(("RB_", "HO_")) and not _is_policy_only(key))
     return {key: cfg[key] for key in sorted(set(keys)) if key in cfg}
 
 
@@ -404,7 +439,7 @@ def calibration_is_current(cfg, source_history_hash, effective_session,
     if cached_method != CALIBRATION_METHOD_VERSION:
         return False
     if cached_hash:
-        return cached_hash == source_history_hash and cached_session == effective_session
+        return cached_hash == source_history_hash and cached_session >= effective_session
     return cached_session in {str(latest_history_session)[:10], effective_session}
 
 
@@ -422,6 +457,8 @@ def build_shadow_calibration_artifact(df, cfg, effective_session=None,
         "TARGET_SIGNAL_CONFIDENCE": artifact_cfg.get("TARGET_SIGNAL_CONFIDENCE"),
         "TARGET_LEAN_CONFIDENCE": artifact_cfg.get("TARGET_LEAN_CONFIDENCE"),
         "SNAPSHOT_NOISE_FLOOR_CENTS": artifact_cfg.get("SNAPSHOT_NOISE_FLOOR_CENTS"),
+        "THRESHOLD_BOOTSTRAP_SAMPLES": artifact_cfg.get("THRESHOLD_BOOTSTRAP_SAMPLES"),
+        "THRESHOLD_BOOTSTRAP_BLOCK_LENGTH": artifact_cfg.get("THRESHOLD_BOOTSTRAP_BLOCK_LENGTH"),
         "ROLLING_WINDOW_DAYS": artifact_cfg.get("ROLLING_WINDOW_DAYS"),
         "CALIBRATION_ERA_START": alignment.CALIBRATION_ERA_START,
     }
@@ -454,47 +491,40 @@ def build_shadow_calibration_artifact(df, cfg, effective_session=None,
 
 
 def write_shadow_calibration_artifact(df, cfg):
-    """Persist one immutable next-session artifact."""
+    """Persist one immutable, monotonically dated next-session artifact."""
     artifacts = load_calibration_artifacts(CALIBRATION_RUNS_PATH)
     clean = alignment.calibration_history(alignment.load_history_from_frame(df))
     effective_session = _next_nymex_business_session(clean["date"].max())
-    existing_index = next(
-        (i for i, item in enumerate(artifacts)
-         if item["effective_session"] == effective_session), None)
-    if existing_index is not None:
-        existing = artifacts[existing_index]
-        # An artifact written by a superseded engine recorded a different
-        # training set -- the previous one trained on the whole file, this one
-        # only on the alignment-verified era -- so its source hash cannot match
-        # and must not be re-verified against the current definition.  It stays
-        # in the ledger as the immutable record of what that session actually
-        # used.
-        if existing.get("candidate_grid_version") != CALIBRATION_METHOD_VERSION:
-            print(f"Existing artifact {existing['artifact_id'][:12]} for {effective_session} "
-                  f"was produced by '{existing.get('candidate_grid_version')}'; leaving it "
-                  f"untouched. New artifacts use '{CALIBRATION_METHOD_VERSION}'.")
-            return existing, False
+    _, training_df = _eligible_training_history(df, effective_session)
+    source_hash = _history_hash(training_df)
 
-        _, training_df = _eligible_training_history(df, effective_session)
-        if (existing["training_end"] != training_df["date"].iloc[-1].date().isoformat()
-                or existing["source_row_count"] != len(training_df)
-                or existing["source_history_hash"] != _history_hash(training_df)):
-            # The existing artifact remains the immutable record of what was
-            # actually available for that decision session. A later authorised
-            # source-data correction becomes eligible on the next business
-            # session; it must never rewrite history retroactively.
-            corrected_session = _next_nymex_business_session(effective_session)
-            if any(item["effective_session"] >= corrected_session for item in artifacts):
-                raise ValueError(
-                    "Corrected source history conflicts with a later calibration artifact.")
-            print(f"Source history was corrected after artifact "
-                  f"{existing['artifact_id'][:12]} became effective; preserving it and "
-                  f"publishing the correction for {corrected_session}.")
-            effective_session = corrected_session
-        else:
-            print(f"Verified existing shadow calibration artifact {existing['artifact_id'][:12]} "
-                  f"for {effective_session} (training through {existing['training_end']}).")
-            return existing, False
+    # Idempotency is keyed by method AND exact eligible source.  Looking only
+    # at the first artifact for the nominal next session caused a method
+    # upgrade to return a superseded artifact and regress the live cache's
+    # effective date.  A matching later artifact is equally valid and must be
+    # found before scheduling anything new.
+    existing = next((item for item in reversed(artifacts)
+                     if item.get("candidate_grid_version") == CALIBRATION_METHOD_VERSION
+                     and item.get("source_history_hash") == source_hash
+                     and item.get("source_row_count") == len(training_df)), None)
+    if existing is not None:
+        print(f"Verified existing shadow calibration artifact {existing['artifact_id'][:12]} "
+              f"for {existing['effective_session']} "
+              f"(training through {existing['training_end']}).")
+        return existing, False
+
+    # Artifacts are immutable and hash chained.  A source correction or method
+    # change is therefore published after the latest occupied session, never
+    # into an old slot and never with an effective date earlier than the cache
+    # that was already served.
+    if artifacts and effective_session <= artifacts[-1]["effective_session"]:
+        effective_session = _next_nymex_business_session(
+            artifacts[-1]["effective_session"])
+        reason = "method changed" if any(
+            item.get("source_history_hash") == source_hash for item in artifacts
+        ) else "source history changed"
+        print(f"Calibration {reason}; preserving the immutable ledger and "
+              f"publishing the replacement for {effective_session}.")
 
     prior = artifacts[-1] if artifacts else None
     artifact = build_shadow_calibration_artifact(
@@ -565,7 +595,9 @@ def main():
     # A source correction discovered after today's artifact became effective
     # is intentionally deferred to the artifact's next-session date.
     effective_session = artifact["effective_session"]
-    save_metrics_cache(cfg, effective_session, source_history_hash)
+    save_metrics_cache(
+        cfg, effective_session, source_history_hash,
+        calibration_artifact_id=artifact["artifact_id"])
     validate_data.validate_calibration_artifacts(CALIBRATION_RUNS_PATH)
     validate_data.validate_and_update_hashes(DATA_DIR)
 

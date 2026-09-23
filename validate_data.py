@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from calibration_artifacts import load_calibration_artifacts
 
 def get_good_friday(year):
@@ -532,6 +532,93 @@ def validate_calibration_artifacts(artifact_path):
         sys.exit(1)
     print("Calibration artifact validation: PASSED")
 
+
+def validate_execution_log(path):
+    """Validate the append-only physical execution and correction ledger."""
+    if not os.path.exists(path):
+        return
+    try:
+        frame = pd.read_csv(path, dtype=str, keep_default_na=False)
+    except Exception as exc:
+        print(f"Data validation failed: Failed to read execution log: {exc}")
+        sys.exit(1)
+    expected = [
+        "record_id", "signal_date", "commodity", "recommendation", "executed_action",
+        "gallons", "load_date", "price_paid_per_gallon",
+        "counterfactual_price_per_gallon", "realized_savings_dollars",
+        "notes", "recorded_at", "supersedes_record_id",
+    ]
+    if list(frame.columns) != expected:
+        print("Data validation failed: execution_log.csv has an unexpected schema.")
+        sys.exit(1)
+    if frame.empty:
+        print("Execution log validation: PASSED")
+        return
+    if frame["record_id"].duplicated().any() or not frame["record_id"].map(
+            lambda value: bool(re.fullmatch(r"[0-9a-f]{32}", value))).all():
+        print("Data validation failed: execution record IDs must be unique UUID hex values.")
+        sys.exit(1)
+
+    seen, superseded = {}, set()
+    for _, row in frame.iterrows():
+        record_id = row["record_id"]
+        try:
+            signal_date = date.fromisoformat(row["signal_date"])
+            recorded_at = datetime.fromisoformat(row["recorded_at"])
+            gallons = float(row["gallons"])
+        except (TypeError, ValueError) as exc:
+            print(f"Data validation failed: malformed execution row {record_id}: {exc}")
+            sys.exit(1)
+        if recorded_at.tzinfo is None or gallons <= 0:
+            print(f"Data validation failed: invalid execution time or gallons in {record_id}.")
+            sys.exit(1)
+        if row["commodity"] not in {"RB", "HO"}:
+            print(f"Data validation failed: invalid execution commodity in {record_id}.")
+            sys.exit(1)
+        if row["recommendation"] not in {"HIKE", "DROP", "FLAT"}:
+            print(f"Data validation failed: invalid execution recommendation in {record_id}.")
+            sys.exit(1)
+        if row["executed_action"] not in {"DISPATCHED_SAME_DAY", "WAITED", "NO_ACTION"}:
+            print(f"Data validation failed: invalid execution action in {record_id}.")
+            sys.exit(1)
+        load_date = date.fromisoformat(row["load_date"]) if row["load_date"] else None
+        if (row["executed_action"] == "DISPATCHED_SAME_DAY"
+                and load_date != signal_date):
+            print(f"Data validation failed: same-day dispatch date mismatch in {record_id}.")
+            sys.exit(1)
+        if row["executed_action"] == "WAITED" and load_date and load_date <= signal_date:
+            print(f"Data validation failed: WAIT load date is not later in {record_id}.")
+            sys.exit(1)
+
+        paid = row["price_paid_per_gallon"]
+        counterfactual = row["counterfactual_price_per_gallon"]
+        realized = row["realized_savings_dollars"]
+        if bool(paid) != bool(counterfactual) or bool(paid) != bool(realized):
+            print(f"Data validation failed: incomplete execution prices in {record_id}.")
+            sys.exit(1)
+        if paid:
+            try:
+                expected_realized = (float(counterfactual) - float(paid)) * gallons
+                if float(paid) <= 0 or float(counterfactual) <= 0:
+                    raise ValueError("prices must be positive")
+                if abs(float(realized) - expected_realized) > 0.011:
+                    raise ValueError("realized savings does not match prices and gallons")
+            except ValueError as exc:
+                print(f"Data validation failed: invalid execution economics in {record_id}: {exc}")
+                sys.exit(1)
+
+        prior = row["supersedes_record_id"]
+        if prior:
+            if prior not in seen or prior in superseded:
+                print(f"Data validation failed: invalid superseded record in {record_id}.")
+                sys.exit(1)
+            if seen[prior] != (row["signal_date"], row["commodity"]):
+                print(f"Data validation failed: correction changes decision identity in {record_id}.")
+                sys.exit(1)
+            superseded.add(prior)
+        seen[record_id] = (row["signal_date"], row["commodity"])
+    print("Execution log validation: PASSED")
+
 # Fields of prediction_log.csv that may legitimately change after a row is
 # written.  Everything else is frozen the moment the row lands, so a change to
 # it is tampering and must fail the run.
@@ -599,6 +686,8 @@ def validate_and_update_hashes(data_dir):
         files_to_track.append("calibration_runs.jsonl")
     if os.path.exists(os.path.join(data_dir, "daily_settlement.json")):
         files_to_track.append("daily_settlement.json")
+    if os.path.exists(os.path.join(data_dir, "execution_log.csv")):
+        files_to_track.append("execution_log.csv")
     
     existing_records = []
     if os.path.exists(hash_csv_path):
@@ -732,12 +821,14 @@ def validate_all(data_dir=None):
     provenance_path = os.path.join(data_dir, "nymex_settlement_provenance.csv")
     artifact_path = os.path.join(data_dir, "calibration_runs.jsonl")
     daily_settlement_path = os.path.join(data_dir, "daily_settlement.json")
+    execution_path = os.path.join(data_dir, "execution_log.csv")
     
     validate_graves_history(csv_path)
     validate_prediction_log(log_path)
     validate_settlement_provenance(provenance_path)
     validate_daily_settlement(daily_settlement_path)
     validate_calibration_artifacts(artifact_path)
+    validate_execution_log(execution_path)
     validate_and_update_hashes(data_dir)
 
 if __name__ == "__main__":

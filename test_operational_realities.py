@@ -521,6 +521,9 @@ class TestPointInTimeCalibrationArtifacts(unittest.TestCase):
             current, "d" * 64, "2026-07-21", "2026-07-20"))
         self.assertFalse(backtest.calibration_is_current(
             current, source_hash, "2026-07-22", "2026-07-21"))
+        future_dated = dict(current, CALIBRATION_EFFECTIVE_SESSION="2026-07-22")
+        self.assertTrue(backtest.calibration_is_current(
+            future_dated, source_hash, "2026-07-21", "2026-07-20"))
 
     def test_method_change_forces_recalibration(self):
         """A cache from a superseded engine must never be served as current."""
@@ -652,7 +655,7 @@ class TestPointInTimeCalibrationArtifacts(unittest.TestCase):
                 "purge_rows": 1,
                 "source_history_hash": backtest._history_hash(eligible),
                 "source_row_count": len(eligible),
-                "candidate_grid_version": "test",
+                "candidate_grid_version": backtest.CALIBRATION_METHOD_VERSION,
                 "candidate_grid": {"windows": [90]},
                 "objective": "test",
                 "smoothing_input": {"BLEND_ALPHA": 0.3},
@@ -691,6 +694,31 @@ class TestPointInTimeCalibrationArtifacts(unittest.TestCase):
             self.assertEqual(replacement["prior_artifact_id"], original["artifact_id"])
             self.assertNotEqual(replacement["source_history_hash"],
                                 original["source_history_hash"])
+
+    def test_method_upgrade_advances_beyond_latest_immutable_artifact(self):
+        history = self._history()
+        session = backtest._next_nymex_business_session(history["date"].iloc[-1])
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            backtest, "CALIBRATION_RUNS_PATH", os.path.join(temp_dir, "runs.jsonl")
+        ):
+            old = backtest.build_shadow_calibration_artifact(
+                history, self._cfg(), effective_session=session)
+            old["candidate_grid_version"] = "superseded-method"
+            old, _ = append_calibration_artifact(backtest.CALIBRATION_RUNS_PATH, old)
+
+            upgraded, created = backtest.write_shadow_calibration_artifact(
+                history, self._cfg())
+
+            self.assertTrue(created)
+            self.assertEqual(
+                upgraded["effective_session"],
+                backtest._next_nymex_business_session(session),
+            )
+            self.assertEqual(
+                upgraded["candidate_grid_version"],
+                backtest.CALIBRATION_METHOD_VERSION,
+            )
+            self.assertEqual(upgraded["prior_artifact_id"], old["artifact_id"])
 
     def test_calibration_refuses_history_outside_the_verified_era(self):
         """The era gate still bites when a boundary is in force.

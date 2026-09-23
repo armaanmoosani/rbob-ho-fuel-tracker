@@ -187,3 +187,37 @@ def test_savings_convention_matches_the_procurement_decision():
     payoff, correct = model.savings_from_signals(nymex, rack, hike=2.0, drop=-2.0)
     assert sorted(payoff.tolist()) == [3.0, 4.0]
     assert correct == 2
+
+
+def test_economic_value_is_asymmetric_and_uses_cents_per_gallon():
+    buy = model.economic_decision_value(
+        "BUY_NOW", expected_rack_move_cents=3.0, gallons=8500,
+        buy_cost_cents=0.5, wait_cost_cents=4.0)
+    wait = model.economic_decision_value(
+        "WAIT", expected_rack_move_cents=-3.0, gallons=8500,
+        buy_cost_cents=0.5, wait_cost_cents=1.25)
+    assert buy["net_edge_cents"] == pytest.approx(2.5)
+    assert buy["net_value_dollars"] == pytest.approx(212.50)
+    assert wait["net_edge_cents"] == pytest.approx(1.75)
+    assert wait["net_value_dollars"] == pytest.approx(148.75)
+
+
+def test_economic_value_rejects_invented_negative_costs():
+    with pytest.raises(ValueError):
+        model.economic_decision_value("WAIT", -2.0, 8500, wait_cost_cents=-0.1)
+
+
+def test_threshold_uncertainty_is_deterministic_and_brackets_point_fit():
+    rng = np.random.default_rng(12)
+    x = rng.normal(0, 8, 360)
+    y = 0.2 + 0.7 * x + rng.normal(0, 2.5, 360)
+    fit = model.fit_passthrough(x, y)
+    hike, drop = model.apply_noise_floor(*fit.threshold_for_confidence(0.75), 0.6)
+    first = model.threshold_uncertainty(
+        x, y, 0.75, 0.6, bootstrap=120, block_length=5, seed=17)
+    second = model.threshold_uncertainty(
+        x, y, 0.75, 0.6, bootstrap=120, block_length=5, seed=17)
+    assert first == second
+    assert first["hike_low"] <= hike <= first["hike_high"]
+    assert first["drop_low"] <= drop <= first["drop_high"]
+    assert first["bootstrap"] == 120

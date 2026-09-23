@@ -72,7 +72,9 @@ def test_calibration_populates_every_published_key():
     for key in ("RB_HIKE_THRESHOLD_CENTS", "RB_DROP_THRESHOLD_CENTS",
                 "RB_pt_slope", "RB_pt_intercept", "RB_pt_residual_quantiles",
                 "RB_oos_precision", "RB_oos_alerts", "RB_oos_window",
-                "RB_insample_precision", "RB_wait_cvar_status"):
+                "RB_insample_precision", "RB_wait_cvar_status",
+                "RB_threshold_ci_hike_low", "RB_threshold_ci_hike_high",
+                "RB_threshold_ci_drop_low", "RB_threshold_ci_drop_high"):
         assert key in cfg, f"calibration did not publish {key}"
     assert cfg["RB_oos_alerts"] == evaluation["alerts"]
     assert "OOS prec=" in message

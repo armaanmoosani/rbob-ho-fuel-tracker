@@ -1,0 +1,1 @@
+record_id,signal_date,commodity,recommendation,executed_action,gallons,load_date,price_paid_per_gallon,counterfactual_price_per_gallon,realized_savings_dollars,notes,recorded_at,supersedes_record_id

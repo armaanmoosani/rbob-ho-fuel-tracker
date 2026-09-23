@@ -151,6 +151,7 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 REPORTS_DIR = os.path.join(os.path.dirname(__file__), "reports")
 LOG_PATH = os.path.join(DATA_DIR, "prediction_log.csv")
 CSV_PATH = os.path.join(DATA_DIR, "graves_history.csv")
+EXECUTION_LOG_PATH = os.path.join(DATA_DIR, "execution_log.csv")
 TZ = pytz.timezone('America/Chicago')
 
 os.makedirs(REPORTS_DIR, exist_ok=True)
@@ -272,6 +273,143 @@ def summarize_captured_convictions(df_source):
             "savings_cents": float(rows["savings_cents"].sum()) if alerts else 0.0,
         }
     return summary
+
+
+def _captured_probability(label):
+    """Read the immutable decision-time probability from a log label."""
+    text = str(label)
+    marker = "| p="
+    if marker not in text:
+        return None
+    try:
+        probability = float(text.rsplit(marker, 1)[1].strip())
+    except (TypeError, ValueError):
+        return None
+    return probability if 0.0 <= probability <= 1.0 else None
+
+
+def live_descriptive_summary(df_source):
+    """Small-sample live metrics that remain honest below significance n=30.
+
+    Precision gets a Beta(1, 1) posterior interval instead of a fragile normal
+    interval.  The Brier score evaluates the probability captured at decision
+    time against whether that recommendation was correct; no current model or
+    threshold is used to re-grade history.
+    """
+    output = {}
+    for label, rows in [("All", df_source), *[
+            (prefix, df_source[df_source["commodity"] == prefix])
+            for prefix in ("RB", "HO")]]:
+        alerts = rows[rows["predicted_direction"].isin(["HIKE", "DROP"])].copy()
+        n = len(alerts)
+        wins = int(alerts["is_correct"].sum()) if n else 0
+        losses = n - wins
+        low, high = stats.beta.ppf([0.025, 0.975], wins + 1, losses + 1)
+        probabilities, outcomes = [], []
+        for row in alerts.itertuples(index=False):
+            probability = _captured_probability(getattr(row, "conviction_label", ""))
+            if probability is not None:
+                probabilities.append(probability)
+                outcomes.append(float(row.is_correct))
+        brier = (float(np.mean((np.asarray(probabilities) - np.asarray(outcomes)) ** 2))
+                 if probabilities else None)
+        mean_probability = float(np.mean(probabilities)) if probabilities else None
+        output[label] = {
+            "alerts": n,
+            "correct": wins,
+            "precision": wins / n if n else None,
+            "precision_low": float(low),
+            "precision_high": float(high),
+            "avg_savings": float(alerts["savings_cents"].mean()) if n else None,
+            "max_adverse": float(alerts["savings_cents"].min()) if n else None,
+            "brier": brier,
+            "mean_probability": mean_probability,
+            "calibration_gap": (
+                wins / n - mean_probability if n and mean_probability is not None else None),
+            "probability_n": len(probabilities),
+        }
+    return output
+
+
+def paired_policy_benchmark(df_source, bootstrap=2000, block_length=5, seed=1729):
+    """Compare selectivity with following the NYMEX sign on every scored row.
+
+    The incremental series is paired by row and then summed within session, so
+    RB and HO shocks stay together.  A moving-block bootstrap preserves short
+    serial dependence across adjacent sessions.
+    """
+    if df_source.empty:
+        return None
+    work = df_source.copy()
+    directions = work["predicted_direction"].to_numpy()
+    actual = work["actual_move"].to_numpy(dtype=float)
+    nymex = pd.to_numeric(work["nymex_move_cents"], errors="coerce").to_numpy()
+    valid = np.isfinite(nymex) & np.isfinite(actual)
+    work, directions, actual, nymex = (
+        work.loc[valid].copy(), directions[valid], actual[valid], nymex[valid])
+    if work.empty:
+        return None
+
+    model_payoff = np.select(
+        [directions == "HIKE", directions == "DROP"], [actual, -actual], default=0.0)
+    sign_payoff = np.sign(nymex) * actual
+    work["incremental"] = model_payoff - sign_payoff
+    work["session"] = work["timestamp_dt"].dt.date.astype(str)
+    session_incremental = work.groupby("session", sort=True)["incremental"].sum().to_numpy()
+
+    n_sessions = len(session_incremental)
+    ci_low = ci_high = float(session_incremental.sum())
+    if n_sessions >= 2 and bootstrap >= 100:
+        length = min(max(1, int(block_length)), n_sessions)
+        blocks_needed = int(np.ceil(n_sessions / length))
+        rng = np.random.default_rng(seed)
+        totals = []
+        for _ in range(int(bootstrap)):
+            starts = rng.integers(0, n_sessions - length + 1, size=blocks_needed)
+            sample = np.concatenate([
+                session_incremental[start:start + length] for start in starts
+            ])[:n_sessions]
+            totals.append(float(sample.sum()))
+        ci_low, ci_high = np.percentile(totals, [2.5, 97.5])
+
+    active = directions != "FLAT"
+    return {
+        "rows": len(work),
+        "accepted": int(active.sum()),
+        "rejected": int((~active).sum()),
+        "model_total": float(model_payoff.sum()),
+        "model_avg_active": float(model_payoff[active].mean()) if active.any() else None,
+        "sign_total": float(sign_payoff.sum()),
+        "sign_avg": float(sign_payoff.mean()),
+        "incremental_total": float((model_payoff - sign_payoff).sum()),
+        "incremental_ci_low": float(ci_low),
+        "incremental_ci_high": float(ci_high),
+        "sessions": n_sessions,
+    }
+
+
+def execution_summary(path=EXECUTION_LOG_PATH):
+    """Aggregate actual user-entered execution economics, never estimates."""
+    if not os.path.exists(path):
+        return {"records": 0, "priced": 0, "gallons": 0.0,
+                "realized_dollars": 0.0, "unpriced": 0}
+    frame = pd.read_csv(path)
+    if frame.empty:
+        return {"records": 0, "priced": 0, "gallons": 0.0,
+                "realized_dollars": 0.0, "unpriced": 0}
+    if {"record_id", "supersedes_record_id"}.issubset(frame.columns):
+        superseded = set(frame["supersedes_record_id"].dropna().astype(str)) - {""}
+        frame = frame[~frame["record_id"].astype(str).isin(superseded)].copy()
+    dollars = pd.to_numeric(frame.get("realized_savings_dollars"), errors="coerce")
+    gallons = pd.to_numeric(frame.get("gallons"), errors="coerce")
+    priced = int(dollars.notna().sum())
+    return {
+        "records": len(frame),
+        "priced": priced,
+        "gallons": float(gallons.fillna(0.0).sum()),
+        "realized_dollars": float(dollars.fillna(0.0).sum()),
+        "unpriced": len(frame) - priced,
+    }
 
 
 def significance_available(live_prediction_count, resolved_live_count):
@@ -501,10 +639,67 @@ def main():
     lifetime_savings_cents = df_alerts['savings_cents'].sum()
     avg_savings_per_active_alert_cents = (lifetime_savings_cents / total_active_alerts) if total_active_alerts > 0 else 0.0
     
-    TRUCK_GALLONS = 8500
+    TRUCK_GALLONS = float(cfg.get("TRUCK_GALLONS", 8500))
     lifetime_savings_dollars = (lifetime_savings_cents / 100.0) * TRUCK_GALLONS
     est_realized_lifetime_dollars = lifetime_savings_dollars * dispatch_rate
     avg_savings_per_truck_dollars = (avg_savings_per_active_alert_cents / 100.0) * TRUCK_GALLONS
+
+    live_diagnostics = live_descriptive_summary(df)
+    diagnostic_rows_html = ""
+    for diagnostic_label in ("All", "RB", "HO"):
+        item = live_diagnostics[diagnostic_label]
+        precision = (f"{item['precision']:.1%}" if item["precision"] is not None else "N/A")
+        interval = (f"{item['precision_low']:.1%}-{item['precision_high']:.1%}"
+                    if item["alerts"] else "N/A")
+        avg_savings = (f"{item['avg_savings']:+.2f}¢"
+                       if item["avg_savings"] is not None else "N/A")
+        adverse = (f"{item['max_adverse']:+.2f}¢"
+                   if item["max_adverse"] is not None else "N/A")
+        brier = (f"{item['brier']:.3f}; quoted {item['mean_probability']:.0%} vs "
+                 f"hit {item['precision']:.0%} (n={item['probability_n']})"
+                 if item["brier"] is not None else "N/A")
+        diagnostic_rows_html += (
+            "<tr style='border-bottom: 1px solid #f1f5f9;'>"
+            f"<td style='padding: 8px 0;'>{diagnostic_label}</td>"
+            f"<td style='padding: 8px 0; text-align:right;'>{item['correct']}/{item['alerts']}</td>"
+            f"<td style='padding: 8px 0; text-align:right;'>{precision}</td>"
+            f"<td style='padding: 8px 0; text-align:right;'>{interval}</td>"
+            f"<td style='padding: 8px 0; text-align:right;'>{avg_savings}</td>"
+            f"<td style='padding: 8px 0; text-align:right;'>{adverse}</td>"
+            f"<td style='padding: 8px 0; text-align:right;'>{brier}</td>"
+            "</tr>"
+        )
+
+    benchmark = paired_policy_benchmark(df)
+    if benchmark is None:
+        benchmark_html = "No scored live rows are available for the policy benchmark."
+    else:
+        model_avg = (f"{benchmark['model_avg_active']:+.2f}¢/accepted decision"
+                     if benchmark["model_avg_active"] is not None else "N/A")
+        benchmark_html = (
+            f"Model accepted {benchmark['accepted']} and rejected {benchmark['rejected']} "
+            f"of {benchmark['rows']} scored rows. Model: {model_avg}, "
+            f"{benchmark['model_total']:+.2f}¢ total. Follow-NYMEX-sign every day: "
+            f"{benchmark['sign_avg']:+.2f}¢/decision, {benchmark['sign_total']:+.2f}¢ total. "
+            f"Paired incremental model value: {benchmark['incremental_total']:+.2f}¢ "
+            f"(moving-block 95% interval {benchmark['incremental_ci_low']:+.2f} to "
+            f"{benchmark['incremental_ci_high']:+.2f}¢ across "
+            f"{benchmark['sessions']} sessions)."
+        )
+
+    executions = execution_summary()
+    if executions["records"]:
+        execution_html = (
+            f"{executions['records']} execution records, {executions['gallons']:,.0f} gallons; "
+            f"actual priced savings {executions['realized_dollars']:+,.2f} dollars across "
+            f"{executions['priced']} priced records. {executions['unpriced']} records still "
+            "need paid and counterfactual prices."
+        )
+    else:
+        execution_html = (
+            "No actual executions have been recorded. Dollar figures below remain modeled "
+            "opportunity estimates, not realized savings."
+        )
     
     # Weekly metrics (Last 7 days activity)
     cutoff_7d = now_chicago - pd.Timedelta(days=7)
@@ -861,7 +1056,7 @@ def main():
                                             <div style="color: #64748b; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Weekly Savings</div>
                                             <div style="color: #22c55e; font-size: 20px; font-weight: 700; margin-top: 6px;">{week_savings_cents:+.2f}¢</div>
                                             <div style="color: #16a34a; font-size: 11px; font-weight: 600; margin-top: 2px;">(${week_savings_dollars:,.2f} Max Modeled)*</div>
-                                            <div style="color: #10b981; font-size: 10px; font-style: italic; margin-top: 2px;">~${est_realized_week_dollars:,.2f} Est. Realized ({dispatch_rate * 100:.0f}% dispatch rate)</div>
+                                            <div style="color: #10b981; font-size: 10px; font-style: italic; margin-top: 2px;">~${est_realized_week_dollars:,.2f} Rate-adjusted model estimate ({dispatch_rate * 100:.0f}% dispatch rate)</div>
                                         </td>
                                     </tr>
                                 </table>
@@ -912,10 +1107,25 @@ def main():
                                             <div style="color: #64748b; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Hypothetical Cum. Savings</div>
                                             <div style="color: #22c55e; font-size: 22px; font-weight: 700; margin-top: 6px;">{lifetime_savings_cents:+.2f}¢/gal</div>
                                             <div style="color: #16a34a; font-size: 11px; font-weight: 600; margin-top: 2px;">(${lifetime_savings_dollars:,.2f} Max Modeled)*</div>
-                                            <div style="color: #10b981; font-size: 10px; font-style: italic; margin-top: 2px;">~${est_realized_lifetime_dollars:,.2f} Est. Realized ({dispatch_rate * 100:.0f}% dispatch rate)</div>
+                                            <div style="color: #10b981; font-size: 10px; font-style: italic; margin-top: 2px;">~${est_realized_lifetime_dollars:,.2f} Rate-adjusted model estimate ({dispatch_rate * 100:.0f}% dispatch rate)</div>
                                         </td>
                                     </tr>
                                 </table>
+
+                                <h3 style="color: #334155; font-size: 16px; margin: 24px 0 12px 0; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; font-weight: 600;">Live Evidence While Sample Accumulates</h3>
+                                <p style="margin: 0 0 8px 0; font-size: 12px; color: #64748b; line-height: 1.5;">Descriptive and Bayesian intervals remain available below 30 live predictions. They quantify uncertainty but are not a significance claim. Brier scores use only probabilities captured at decision time.</p>
+                                <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 24px; font-size: 12px;">
+                                    <tr style="border-bottom: 2px solid #e2e8f0; color: #64748b; text-align: left;">
+                                        <th style="padding: 8px 0;">Product</th><th style="padding: 8px 0; text-align:right;">Correct</th><th style="padding: 8px 0; text-align:right;">Precision</th><th style="padding: 8px 0; text-align:right;">Bayesian 95%</th><th style="padding: 8px 0; text-align:right;">Avg savings</th><th style="padding: 8px 0; text-align:right;">Worst</th><th style="padding: 8px 0; text-align:right;">Brier / calibration</th>
+                                    </tr>
+                                    {diagnostic_rows_html}
+                                </table>
+
+                                <h3 style="color: #334155; font-size: 16px; margin: 24px 0 12px 0; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; font-weight: 600;">Decision Policy Benchmark</h3>
+                                <p style="margin: 0 0 24px 0; font-size: 12px; color: #475569; line-height: 1.5;">{benchmark_html}</p>
+
+                                <h3 style="color: #334155; font-size: 16px; margin: 24px 0 12px 0; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; font-weight: 600;">Actual Execution Ledger</h3>
+                                <p style="margin: 0 0 24px 0; font-size: 12px; color: #475569; line-height: 1.5;">{execution_html}</p>
 
                                 <h3 style="color: #334155; font-size: 16px; margin: 24px 0 12px 0; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; font-weight: 600;">Captured Live Conviction Performance</h3>
                                 <p style="margin: 0 0 8px 0; font-size: 12px; color: #64748b; line-height: 1.5;">{captured_conviction_count} resolved active live alerts have a conviction label captured at decision time. Legacy and backfilled rows are excluded.</p>
@@ -956,7 +1166,7 @@ def main():
                                             </p>
                                             <p style="margin: 6px 0 0 0; font-size: 11px; color: #b45309; line-height: 1.4;">
                                                 Because the system has no visibility into your physical tank levels or carrier dispatch delays, savings calculations are initial theoretical limits. Under your load-time price lock contract with Graves Oil, orders must physically load before midnight CT to secure same-day pricing.
-                                                <strong>To find your estimated realized savings:</strong> We discount modeled savings by {100 - dispatch_rate * 100:.0f}% (based on a user-configured dispatch same-day load rate of {dispatch_rate * 100:.0f}%) to account for dispatch delays and physical capacity constraints. Or, multiply your actual delivery volume by the <strong>Average Savings per Active Alert ({avg_savings_per_active_alert_cents:+.2f}&cent;/gal)</strong>.
+                                                The rate-adjusted estimate discounts modeled opportunity by {100 - dispatch_rate * 100:.0f}% (based on a user-configured same-day load rate of {dispatch_rate * 100:.0f}%). It is not realized savings. Only records in the Actual Execution Ledger use paid and counterfactual prices. The modeled per-load conversion uses {TRUCK_GALLONS:,.0f} gallons.
                                             </p>
                                         </td>
                                     </tr>
