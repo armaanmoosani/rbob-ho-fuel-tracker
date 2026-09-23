@@ -42,6 +42,11 @@ def test_parse_authorization_code_rejects_mismatched_state():
         raise AssertionError("Expected a state mismatch error")
 
 
+def test_open_authorization_url_handles_browser_failure():
+    with patch("handshake.webbrowser.open", side_effect=handshake.webbrowser.Error):
+        assert handshake.open_authorization_url("https://example.test") is False
+
+
 def test_exchange_code_uses_saved_redirect_uri():
     response = MagicMock()
     response.json.return_value = {"refresh_token": "refresh"}
@@ -85,9 +90,33 @@ def test_handshake_does_not_print_token_after_automatic_secret_update(capsys):
     with patch("handshake.get_credentials", return_value=credentials), patch(
         "handshake.secrets.token_urlsafe", return_value="state"
     ), patch("builtins.input", return_value="https://127.0.0.1/?code=code&state=state"), patch(
+        "handshake.open_authorization_url", return_value=True
+    ), patch(
         "handshake.exchange_code", return_value={"refresh_token": "do-not-print"}
     ), patch("handshake.update_github_refresh_token", return_value=(True, None)):
         handshake.run_handshake()
     output = capsys.readouterr().out
     assert "SCHWAB_REFRESH_TOKEN was updated" in output
     assert "do-not-print" not in output
+
+
+def test_handshake_does_not_print_token_when_secret_update_fails(capsys):
+    credentials = {
+        "app_key": "key",
+        "app_secret": "secret",
+        "redirect_uri": "https://127.0.0.1",
+    }
+    with patch("handshake.get_credentials", return_value=credentials), patch(
+        "handshake.secrets.token_urlsafe", return_value="state"
+    ), patch("builtins.input", return_value="https://127.0.0.1/?code=code&state=state"), patch(
+        "handshake.open_authorization_url", return_value=True
+    ), patch(
+        "handshake.exchange_code", return_value={"refresh_token": "do-not-print"}
+    ), patch("handshake.update_github_refresh_token", return_value=(False, "no repository")):
+        try:
+            handshake.run_handshake()
+        except RuntimeError as error:
+            assert "will not be printed" in str(error)
+        else:
+            raise AssertionError("Expected secret update failure")
+    assert "do-not-print" not in capsys.readouterr().out

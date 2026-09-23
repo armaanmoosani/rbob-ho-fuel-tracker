@@ -241,10 +241,13 @@ confidence, and guessing would inject the very error this removed.
 
 ### Refreshing the Schwab OAuth token
 
-Run `python3 handshake.py`. The first run asks for the app key, secret and
-redirect URI once and stores them in the macOS Keychain. A successful exchange
-updates `SCHWAB_REFRESH_TOKEN` via the GitHub CLI without printing it. Use
-`--configure` to replace saved values or `--forget-credentials` to delete them.
+Run `./refreshschwab` from the repository, or the `schwab` shell alias from any
+directory. The launcher opens the Schwab authorization page in the default
+browser. The first run asks for the app key, secret and redirect URI once and
+stores them in the macOS Keychain. A successful exchange updates
+`SCHWAB_REFRESH_TOKEN` via the GitHub CLI without printing it. Use
+`./refreshschwab --configure` to replace saved values or
+`./refreshschwab --forget-credentials` to delete them.
 
 ---
 

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import urllib.parse
 import re
+import webbrowser
 
 try:
     import requests
@@ -142,6 +143,14 @@ def authorization_url(credentials, state):
     return f"https://api.schwabapi.com/v1/oauth/authorize?{urllib.parse.urlencode(params)}"
 
 
+def open_authorization_url(url):
+    """Open the OAuth page without preventing the manual fallback flow."""
+    try:
+        return webbrowser.open(url, new=2)
+    except webbrowser.Error:
+        return False
+
+
 def parse_authorization_code(redirected_input, expected_state):
     code = redirected_input
     if "code=" in redirected_input:
@@ -221,8 +230,12 @@ def run_handshake(force_configure=False):
     print("\n----------------------------------------------------------------------")
     print("STEP 1: AUTHORIZE THE APP IN YOUR BROWSER")
     print("----------------------------------------------------------------------")
-    print("Open this URL in your browser:\n")
-    print(authorization_url(credentials, state))
+    url = authorization_url(credentials, state)
+    if open_authorization_url(url):
+        print("Opened the Schwab authorization page in your default browser.")
+    else:
+        print("Could not open a browser automatically. Open this URL instead:\n")
+        print(url)
     print("\nAfter authorizing, paste the entire redirected URL here.")
     redirected_input = input("Redirected URL: ").strip()
     code = parse_authorization_code(redirected_input, state)
@@ -239,10 +252,10 @@ def run_handshake(force_configure=False):
         print("\n[SUCCESS] SCHWAB_REFRESH_TOKEN was updated in GitHub Actions secrets.")
         return
     print(f"\n[WARNING] Automatic GitHub secret update failed: {error}")
-    print("Update SCHWAB_REFRESH_TOKEN manually with this value:\n")
-    print("======================================================================")
-    print(refresh_token)
-    print("======================================================================")
+    raise RuntimeError(
+        "The new refresh token was not written to GitHub Secrets and will not be "
+        "printed. Fix the GitHub CLI/repository configuration, then run the handshake again."
+    )
 
 
 def main():
