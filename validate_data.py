@@ -237,7 +237,7 @@ def validate_graves_history(csv_path):
 
     print("Graves history data validation: PASSED")
 
-def validate_prediction_log(log_path):
+def validate_prediction_log(log_path, artifact_path=None):
     if not os.path.exists(log_path):
         return
         
@@ -346,6 +346,23 @@ def validate_prediction_log(log_path):
             except (TypeError, ValueError):
                 print(f"Data validation failed: Captured live conviction has invalid {col}.")
                 sys.exit(1)
+    immutable_artifact_refs = {
+        str(value) for value in captured['calibration_artifact_id']
+        if re.fullmatch(r"[0-9a-f]{64}", str(value))
+    }
+    artifacts_by_id = {}
+    if immutable_artifact_refs:
+        if artifact_path is None:
+            artifact_path = os.path.join(os.path.dirname(log_path), "calibration_runs.jsonl")
+        try:
+            artifacts_by_id = {
+                artifact["artifact_id"]: artifact
+                for artifact in load_calibration_artifacts(artifact_path)
+            }
+        except Exception as exc:
+            print(f"Data validation failed: Cannot verify prediction calibration artifacts: {exc}")
+            sys.exit(1)
+
     for _, row in captured.iterrows():
         if not re.fullmatch(r"[0-9a-f]{64}", str(row['runtime_config_hash'])):
             print("Data validation failed: Captured live conviction lacks runtime config hash.")
@@ -359,11 +376,58 @@ def validate_prediction_log(log_path):
         if session != 'unknown' and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", session):
             print("Data validation failed: Captured live conviction has invalid calibration session.")
             sys.exit(1)
-        artifact = str(row['calibration_artifact_id'])
-        expected_artifact = f"metrics:{str(row['metrics_cache_hash'])[:16]}"
-        if str(row['metrics_cache_hash']) != 'missing' and artifact != expected_artifact:
+        artifact_ref = str(row['calibration_artifact_id'])
+        metrics_hash = str(row['metrics_cache_hash'])
+        legacy_artifact_ref = f"metrics:{metrics_hash[:16]}"
+        if metrics_hash == 'missing' and artifact_ref == 'unknown':
+            calibration_artifact = None
+        elif artifact_ref == legacy_artifact_ref and metrics_hash != 'missing':
+            # Historical rows predate the immutable artifact ledger and identify
+            # their calibration by the metrics cache content hash instead.
+            calibration_artifact = None
+        elif re.fullmatch(r"[0-9a-f]{64}", artifact_ref):
+            calibration_artifact = artifacts_by_id.get(artifact_ref)
+            if calibration_artifact is None:
+                print("Data validation failed: Captured live conviction references an unknown "
+                      "calibration artifact.")
+                sys.exit(1)
+            if calibration_artifact['effective_session'] != session:
+                print("Data validation failed: Captured live conviction calibration artifact "
+                      "does not match its effective session.")
+                sys.exit(1)
+        else:
             print("Data validation failed: Captured live conviction has mismatched calibration artifact.")
             sys.exit(1)
+
+        if calibration_artifact is not None:
+            commodity = str(row['commodity'])
+            calibration = calibration_artifact['calibration']
+            calibration_fields = {
+                'nymex_daily_std_used': f'{commodity}_nymex_daily_std',
+                'hike_threshold_used': f'{commodity}_HIKE_THRESHOLD_CENTS',
+                'drop_threshold_used': f'{commodity}_DROP_THRESHOLD_CENTS',
+                'lean_hike_threshold_used': f'{commodity}_LEAN_HIKE_CENTS',
+                'lean_drop_threshold_used': f'{commodity}_LEAN_DROP_CENTS',
+                'window_used': f'{commodity}_window_days',
+                'lag_used': 'LAG_DAYS',
+            }
+            for row_field, calibration_field in calibration_fields.items():
+                if calibration_field not in calibration:
+                    print("Data validation failed: Prediction calibration artifact lacks "
+                          f"{calibration_field}.")
+                    sys.exit(1)
+                try:
+                    recorded = float(row[row_field])
+                    calibrated = float(calibration[calibration_field])
+                except (KeyError, TypeError, ValueError):
+                    print("Data validation failed: Captured live conviction has an invalid "
+                          f"artifact-backed {row_field}.")
+                    sys.exit(1)
+                if not (math.isfinite(recorded) and math.isfinite(calibrated)) or abs(
+                        recorded - calibrated) > 0.00011:
+                    print("Data validation failed: Captured live conviction does not match "
+                          f"artifact field {calibration_field}.")
+                    sys.exit(1)
 
         try:
             move = float(row['nymex_move_cents'])
@@ -824,7 +888,7 @@ def validate_all(data_dir=None):
     execution_path = os.path.join(data_dir, "execution_log.csv")
     
     validate_graves_history(csv_path)
-    validate_prediction_log(log_path)
+    validate_prediction_log(log_path, artifact_path)
     validate_settlement_provenance(provenance_path)
     validate_daily_settlement(daily_settlement_path)
     validate_calibration_artifacts(artifact_path)

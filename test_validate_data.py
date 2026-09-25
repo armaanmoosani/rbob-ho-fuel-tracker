@@ -11,6 +11,7 @@ from datetime import datetime, date
 # Add current directory to path
 sys.path.append(os.path.dirname(__file__))
 import validate_data
+from calibration_artifacts import artifact_id, canonical_json
 
 class TestValidateData(unittest.TestCase):
     def setUp(self):
@@ -20,6 +21,75 @@ class TestValidateData(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir)
+
+    def _calibration_artifact(self, effective_session="2026-05-20"):
+        artifact = {
+            "artifact_schema_version": 2,
+            "effective_session": effective_session,
+            "training_start": "2026-01-01",
+            "training_end": "2026-05-19",
+            "purge_rows": 1,
+            "source_history_hash": "d" * 64,
+            "source_row_count": 100,
+            "candidate_grid_version": "test-v2",
+            "objective": "test objective",
+            "prior_artifact_id": "bootstrap_config",
+            "calibration": {
+                "RB_nymex_daily_std": 8.0,
+                "RB_HIKE_THRESHOLD_CENTS": 1.8,
+                "RB_DROP_THRESHOLD_CENTS": -1.5,
+                "RB_LEAN_HIKE_CENTS": 0.9,
+                "RB_LEAN_DROP_CENTS": -0.8,
+                "RB_window_days": 240,
+                "LAG_DAYS": 0,
+            },
+            "candidate_grid": {"window": 240},
+            "smoothing_input": {"window": 240},
+            "generated_at": "2026-05-19T21:00:00-05:00",
+        }
+        artifact["artifact_id"] = artifact_id(artifact)
+        return artifact
+
+    def _captured_prediction(self, calibration_ref):
+        return {
+            "timestamp": "2026-05-20T14:35:00-05:00",
+            "commodity": "RB",
+            "predicted_direction": "HIKE",
+            "nymex_move_cents": 2.0,
+            "lag_used": 0,
+            "window_used": 240,
+            "threshold_used": 1.8,
+            "actual_next_day_move_cents": "PENDING",
+            "prediction_source": "live",
+            "signal_contract": "/RBM26",
+            "baseline_contract": "/RBM26",
+            "settlement_source": "schwab",
+            "baseline_source": "schwab_close_price",
+            "settlement_captured_at": "2026-05-20T13:30:00-05:00",
+            "contract_provenance_status": "verified",
+            "log_schema_version": "3",
+            "nymex_daily_std_used": 8.0,
+            "z_score_used": 0.25,
+            "conviction_label": "Moderate confidence (80%) | p=0.8000",
+            "conviction_provenance": "passthrough_model_v2",
+            "hike_threshold_used": 1.8,
+            "drop_threshold_used": -1.5,
+            "lean_hike_threshold_used": 0.9,
+            "lean_drop_threshold_used": -0.8,
+            "signal_price_used": 2.02,
+            "baseline_price_used": 2.0,
+            "runtime_config_hash": "a" * 64,
+            "config_file_hash": "b" * 64,
+            "metrics_cache_hash": "c" * 64,
+            "calibration_effective_session": "2026-05-20",
+            "calibration_artifact_id": calibration_ref,
+        }
+
+    def _write_artifact(self, artifact):
+        path = os.path.join(self.temp_dir, "calibration_runs.jsonl")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(canonical_json(artifact) + "\n")
+        return path
 
     def test_is_cme_holiday(self):
         # Good Friday 2026 was April 3rd
@@ -133,6 +203,49 @@ class TestValidateData(unittest.TestCase):
         df.to_csv(self.log_path, index=False)
         # Should not raise exception
         validate_data.validate_prediction_log(self.log_path)
+
+    def test_validate_prediction_log_accepts_immutable_calibration_artifact(self):
+        artifact = self._calibration_artifact()
+        artifact_path = self._write_artifact(artifact)
+        pd.DataFrame([self._captured_prediction(artifact["artifact_id"])]).to_csv(
+            self.log_path, index=False)
+
+        validate_data.validate_prediction_log(self.log_path, artifact_path)
+
+    def test_validate_prediction_log_accepts_legacy_metrics_reference(self):
+        row = self._captured_prediction("metrics:" + "c" * 16)
+        pd.DataFrame([row]).to_csv(self.log_path, index=False)
+
+        validate_data.validate_prediction_log(self.log_path)
+
+    def test_validate_prediction_log_rejects_unknown_immutable_artifact(self):
+        artifact = self._calibration_artifact()
+        artifact_path = self._write_artifact(artifact)
+        pd.DataFrame([self._captured_prediction("f" * 64)]).to_csv(
+            self.log_path, index=False)
+
+        with self.assertRaises(SystemExit):
+            validate_data.validate_prediction_log(self.log_path, artifact_path)
+
+    def test_validate_prediction_log_rejects_artifact_session_mismatch(self):
+        artifact = self._calibration_artifact(effective_session="2026-05-21")
+        artifact_path = self._write_artifact(artifact)
+        pd.DataFrame([self._captured_prediction(artifact["artifact_id"])]).to_csv(
+            self.log_path, index=False)
+
+        with self.assertRaises(SystemExit):
+            validate_data.validate_prediction_log(self.log_path, artifact_path)
+
+    def test_validate_prediction_log_rejects_artifact_calibration_mismatch(self):
+        artifact = self._calibration_artifact()
+        artifact_path = self._write_artifact(artifact)
+        row = self._captured_prediction(artifact["artifact_id"])
+        row["hike_threshold_used"] = 1.81
+        row["threshold_used"] = 1.81
+        pd.DataFrame([row]).to_csv(self.log_path, index=False)
+
+        with self.assertRaises(SystemExit):
+            validate_data.validate_prediction_log(self.log_path, artifact_path)
 
     def test_validate_prediction_log_invalid_source(self):
         df = pd.DataFrame({
