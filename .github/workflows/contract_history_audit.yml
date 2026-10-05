@@ -18,7 +18,10 @@ concurrency:
 
 jobs:
   audit:
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest: GitHub migrates that label to
+    # Ubuntu 26 on 2026-10-19, which would change the base image under a
+    # live pipeline with no warning. Pin deliberately and move when tested.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
