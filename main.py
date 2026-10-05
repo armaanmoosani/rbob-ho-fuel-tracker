@@ -607,6 +607,28 @@ def save_settlement_snapshots(all_data, now):
 # unsafe to act on.  Set just under TARGET_SIGNAL_CONFIDENCE (0.75) so it fires
 # only when the live move sits below where the threshold was placed, which
 # happens when the cache and the thresholds have drifted apart.
+# The daily verdict is eligible from 2:35 PM CT and keeps retrying until the
+# CME close at 4:00 PM CT.
+#
+# It used to fire only while the clock read 14:3x-14:5x, a 25-minute window.
+# With the tracker polling every five minutes that is five chances, and on
+# 2026-10-05 GitHub failed to allocate a hosted runner for the whole window:
+# every run between 14:20 and 14:45 CT was cancelled or failed, so no verdict
+# was produced at all that day.
+#
+# Retrying costs nothing in accuracy.  build_rack_signal reads the 1:30 PM
+# settlement snapshot, not a live price, so a verdict sent at 3:40 PM is
+# identical to the one that would have gone at 2:35 PM -- and still actionable,
+# because the rack is not posted until about 6:00 PM.  send_once_today
+# guarantees a single delivery and only records the day as sent once a
+# recipient has actually been reached.
+#
+# The cutoff is the market close so the run never happens on a closed market,
+# where main() exits before reaching this point anyway.
+VERDICT_WINDOW_START = (14, 35)
+VERDICT_WINDOW_END = (16, 0)
+VERDICT_LATE_AFTER_MINUTES = 10
+
 LOW_CONFIDENCE_CUTOFF = 0.70
 
 # Baseline sources that are the same measurement the model was fitted on, so a
@@ -1982,11 +2004,19 @@ def main():
             'action_color': '#8b5cf6'
         }
         send_email("Final Verdict (On Demand): Exxon Price Predictor", all_data, now, alert_ctx)
-    elif local_now.hour == 14 and local_now.minute >= 35:
+    elif VERDICT_WINDOW_START <= (local_now.hour, local_now.minute) < VERDICT_WINDOW_END:
         attach_rack_signals(all_data, now)
+        late_by = (local_now.hour * 60 + local_now.minute) - (
+            VERDICT_WINDOW_START[0] * 60 + VERDICT_WINDOW_START[1])
+        action = ('Comparing the 1:30 PM CT NYMEX settlement-window move to the prior '
+                  'settlement to estimate tonight\u2019s OPIS/Graves rack direction.')
+        if late_by >= VERDICT_LATE_AFTER_MINUTES:
+            action = (f'DELAYED BY {late_by} MINUTES \u2014 this verdict could not be sent at '
+                      f'2:35 PM CT. The verdict itself is unchanged: it is computed from the '
+                      f'1:30 PM settlement snapshot, which is final. ') + action
         send_once_today('VERDICT_1435', "Final Verdict: Exxon Price Predictor", all_data, now, {
             'label': 'Final Verdict',
-            'action': 'Comparing the 1:30 PM CT NYMEX settlement-window move to the prior settlement to estimate tonight’s OPIS/Graves rack direction.',
+            'action': action,
             'action_color': '#8b5cf6'
         })
 

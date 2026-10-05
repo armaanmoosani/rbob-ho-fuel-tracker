@@ -15,7 +15,19 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 concurrency:
-  group: rbob-tracker
+  # The tracker has its own group, separate from the data workflows.
+  #
+  # All four workflows previously shared "rbob-tracker" to serialise git
+  # pushes.  The side effect was that a nightly ingest -- which runs the full
+  # calibration and takes minutes -- blocked every tracker dispatch for its
+  # duration, and because only one run per group may be pending, the queued
+  # tracker runs cancelled each other.  On 2026-10-05 that turned a GitHub
+  # runner shortage into a cascade of failure/cancelled/cancelled across the
+  # 2:35 PM CT verdict window, and no verdict was produced that day.
+  #
+  # Push safety no longer depends on this: the persist step below pulls with
+  # rebase and retries, and ingest_prices/backtest do their own pull-rebase.
+  group: rbob-tracker-live
   cancel-in-progress: false
 
 permissions:
@@ -66,8 +78,23 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/prediction_log.csv
           [ -f data/daily_settlement.json ] && git add data/daily_settlement.json || true
-          if ! git diff --cached --quiet; then
-            git commit -m "Record live fuel provenance"
-            git pull --rebase origin main
-            git push origin main
+          if git diff --cached --quiet; then
+            echo "Nothing to persist."
+            exit 0
           fi
+          git commit -m "Record live fuel provenance"
+          # Retry the rebase/push: now that this workflow has its own
+          # concurrency group it can race the data workflows, and a lost race
+          # must not fail the job -- the alert has already been sent by this
+          # point, so only the log row is at stake.
+          for attempt in 1 2 3 4 5; do
+            if git pull --rebase origin main && git push origin main; then
+              echo "Persisted on attempt $attempt."
+              exit 0
+            fi
+            echo "Push attempt $attempt lost a race; retrying in $((attempt * 5))s."
+            git rebase --abort 2>/dev/null || true
+            sleep $((attempt * 5))
+          done
+          echo "::warning::Could not persist the prediction log after 5 attempts; the alert was already sent, only the log row is missing."
+          exit 0
