@@ -64,3 +64,9 @@ jobs:
         run: |
           python ingest_prices.py
 
+  shadow-outcomes:
+    needs: ingest
+    permissions:
+      contents: write
+    uses: ./.github/workflows/shadow_trial.yml
+

@@ -259,6 +259,7 @@ stores them in the macOS Keychain. A successful exchange updates
 ## Verification
 
 ```bash
+python3 -m pip install -r requirements-research.txt # full test/research dependencies
 python3 -m pytest -q              # full suite
 python3 alignment.py              # alignment report
 python3 alignment.py --scan       # re-derive the era boundary
@@ -267,6 +268,27 @@ python3 replay_day.py --date ...  # point-in-time replay of a logged decision
 python3 record_execution.py --help # log a physical purchase/deferral outcome
 python3 generate_readme_stats.py --check   # fail if this README has drifted
 ```
+
+Offline ML research is available with
+`python3 scratch/compare_ml_models.py --output-dir reports`. It compares the
+production regression with Huber, Ridge residual corrections, and shallow
+boosted residual corrections using earlier-only forecasts and calibration.
+It writes research artifacts under `reports/` and does not activate models or
+modify live data. See [the November 4 comparison](docs/ml-model-comparison-2026-11-04.md)
+for results, corrected uncertainty estimates, and the prospective promotion
+standard. Primary tracker/ingestion jobs use `requirements.txt`; isolated
+shadow workers use `requirements-shadow.txt`. CI includes the research
+dependencies so the ML causality tests run as part of the full suite.
+
+The prospective gasoline Huber shadow trial starts November 5, 2026. Inputs
+are sealed at the daily verdict, forecasts are computed in a separate job,
+and actual rack outcomes are scored after ingestion. Current purchasing alerts
+remain on the production model. `python3 shadow_trial.py status` shows progress;
+the weekly email has a separate shadow section. The operational checkpoint is
+60 resolved pairs; the single formal review is the fixed first 320 eligible
+sessions, with no automatic model promotion. See the
+[registered shadow protocol](docs/shadow-trial-protocol.md) for eligibility,
+failure accounting, power assumptions, and the expected review horizon.
 
 `verify_statistics.py` is seeded and does not write any file unless given
 `--chart`. Every check in it can fail; four checks in the previous version could

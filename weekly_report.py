@@ -14,6 +14,12 @@ from datetime import date as _date
 from futures_util import previous_nymex_business_day
 import pytz
 import json
+from html import escape as escape_html
+
+
+def shadow_trial_report_html(data_dir):
+    import shadow_trial
+    return escape_html(shadow_trial.report_text(data_dir))
 
 def mask_recipient(address):
     if not address:
@@ -687,6 +693,7 @@ def main():
             f"{benchmark['sessions']} sessions)."
         )
 
+    shadow_html = shadow_trial_report_html(DATA_DIR)
     executions = execution_summary()
     if executions["records"]:
         execution_html = (
@@ -1126,6 +1133,9 @@ def main():
 
                                 <h3 style="color: #334155; font-size: 16px; margin: 24px 0 12px 0; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; font-weight: 600;">Actual Execution Ledger</h3>
                                 <p style="margin: 0 0 24px 0; font-size: 12px; color: #475569; line-height: 1.5;">{execution_html}</p>
+
+                                <h3 style="color: #334155; font-size: 16px; margin: 24px 0 12px 0; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; font-weight: 600;">Gasoline Huber Shadow Trial (Not Active)</h3>
+                                <p style="margin: 0 0 24px 0; font-size: 12px; color: #475569; line-height: 1.5;">{shadow_html}</p>
 
                                 <h3 style="color: #334155; font-size: 16px; margin: 24px 0 12px 0; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; font-weight: 600;">Captured Live Conviction Performance</h3>
                                 <p style="margin: 0 0 8px 0; font-size: 12px; color: #64748b; line-height: 1.5;">{captured_conviction_count} resolved active live alerts have a conviction label captured at decision time. Legacy and backfilled rows are excluded.</p>

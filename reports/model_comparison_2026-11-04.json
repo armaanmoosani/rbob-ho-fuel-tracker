@@ -1,0 +1,431 @@
+{
+  "history_sha256": "599deb8cf1be73a2372ef35940eed4e704fef5241554be4ab91bcd2a7e33b34a",
+  "method": {
+    "candidate_names": [
+      "current_360",
+      "short_180",
+      "recent_weighted_360"
+    ],
+    "purge_observations": 1,
+    "weighted_half_life_observations": 90,
+    "bootstrap_block_observations": 10,
+    "target": 0.75,
+    "lean_target": 0.65,
+    "noise_floor_cents": 0.6,
+    "qualification": "Historical research forecasts; not recorded live results or an untouched holdout. No candidate search or automatic promotion. Positive paired improvements favor the candidate. Intervals are exploratory, not adjusted for multiple comparisons. Payoffs are equal-volume gross timing proxies, exclude inventory/fees, and are not actual savings. Each commodity is evaluated separately; RB/HO are never pooled as independent observations. Lean and full alerts are both scored."
+  },
+  "commodities": {
+    "RB": {
+      "all": {
+        "current_360": {
+          "sessions": 413,
+          "start": "2024-10-07",
+          "end": "2026-11-04",
+          "mae_cents": 1.841196587116881,
+          "rmse_cents": 2.983807469998729,
+          "brier_up_all_sessions": 0.12400487209595552,
+          "alerts": 344,
+          "precision": 0.8924418604651163,
+          "payoff_cents_per_session": 3.292251815980631,
+          "payoff_cents_per_alert": 3.952616279069769,
+          "mse_improvement_vs_current": 0.0,
+          "mse_improvement_95_interval": [
+            0.0,
+            0.0
+          ],
+          "payoff_improvement_cents_per_session": 0.0,
+          "payoff_improvement_95_interval": [
+            0.0,
+            0.0
+          ]
+        },
+        "short_180": {
+          "sessions": 413,
+          "start": "2024-10-07",
+          "end": "2026-11-04",
+          "mae_cents": 1.8759435506130848,
+          "rmse_cents": 2.9939248413479267,
+          "brier_up_all_sessions": 0.1296156400622959,
+          "alerts": 325,
+          "precision": 0.8923076923076924,
+          "payoff_cents_per_session": 3.254358353510897,
+          "payoff_cents_per_alert": 4.135538461538464,
+          "mse_improvement_vs_current": -0.06047893761999322,
+          "mse_improvement_95_interval": [
+            -0.6190668659604179,
+            0.4317482635658076
+          ],
+          "payoff_improvement_cents_per_session": -0.03789346246973362,
+          "payoff_improvement_95_interval": [
+            -0.0808970944309928,
+            0.00029600484261532077
+          ]
+        },
+        "recent_weighted_360": {
+          "sessions": 413,
+          "start": "2024-10-07",
+          "end": "2026-11-04",
+          "mae_cents": 1.8383592646278615,
+          "rmse_cents": 2.9618787835017377,
+          "brier_up_all_sessions": 0.12622227391680868,
+          "alerts": 330,
+          "precision": 0.8939393939393939,
+          "payoff_cents_per_session": 3.260799031476999,
+          "payoff_cents_per_alert": 4.080939393939396,
+          "mse_improvement_vs_current": 0.1303810898624799,
+          "mse_improvement_95_interval": [
+            -0.19899198595663825,
+            0.39362814556185804
+          ],
+          "payoff_improvement_cents_per_session": -0.03145278450363194,
+          "payoff_improvement_95_interval": [
+            -0.05961440677966101,
+            -0.00898123486682817
+          ]
+        }
+      },
+      "earlier": {
+        "current_360": {
+          "sessions": 323,
+          "start": "2024-10-07",
+          "end": "2026-06-22",
+          "mae_cents": 1.8199558388506536,
+          "rmse_cents": 3.1066072408727536,
+          "brier_up_all_sessions": 0.13203299932064366,
+          "alerts": 263,
+          "precision": 0.8897338403041825,
+          "payoff_cents_per_session": 2.9384829721362236,
+          "payoff_cents_per_alert": 3.608859315589355,
+          "mse_improvement_vs_current": 0.0,
+          "mse_improvement_95_interval": [
+            0.0,
+            0.0
+          ],
+          "payoff_improvement_cents_per_session": 0.0,
+          "payoff_improvement_95_interval": [
+            0.0,
+            0.0
+          ]
+        },
+        "short_180": {
+          "sessions": 323,
+          "start": "2024-10-07",
+          "end": "2026-06-22",
+          "mae_cents": 1.8972703208073582,
+          "rmse_cents": 3.1453905161953344,
+          "brier_up_all_sessions": 0.13946707208668674,
+          "alerts": 247,
+          "precision": 0.8866396761133604,
+          "payoff_cents_per_session": 2.887770897832818,
+          "payoff_cents_per_alert": 3.7763157894736854,
+          "mse_improvement_vs_current": -0.24247295032852736,
+          "mse_improvement_95_interval": [
+            -0.8795359588639644,
+            0.394192172035062
+          ],
+          "payoff_improvement_cents_per_session": -0.05071207430340562,
+          "payoff_improvement_95_interval": [
+            -0.10480650154798783,
+            -0.008297213622291267
+          ]
+        },
+        "recent_weighted_360": {
+          "sessions": 323,
+          "start": "2024-10-07",
+          "end": "2026-06-22",
+          "mae_cents": 1.8460800535060506,
+          "rmse_cents": 3.1045798584574382,
+          "brier_up_all_sessions": 0.13508769461984485,
+          "alerts": 249,
+          "precision": 0.891566265060241,
+          "payoff_cents_per_session": 2.8982662538699695,
+          "payoff_cents_per_alert": 3.759598393574298,
+          "mse_improvement_vs_current": 0.012592451503415533,
+          "mse_improvement_95_interval": [
+            -0.34414802182396487,
+            0.3745240519656055
+          ],
+          "payoff_improvement_cents_per_session": -0.040216718266253844,
+          "payoff_improvement_95_interval": [
+            -0.07406269349845224,
+            -0.012074303405572926
+          ]
+        }
+      },
+      "recent_90": {
+        "current_360": {
+          "sessions": 90,
+          "start": "2026-06-23",
+          "end": "2026-11-04",
+          "mae_cents": 1.9174272725612307,
+          "rmse_cents": 2.4937865833606283,
+          "brier_up_all_sessions": 0.09519281550068587,
+          "alerts": 81,
+          "precision": 0.9012345679012346,
+          "payoff_cents_per_session": 4.561888888888892,
+          "payoff_cents_per_alert": 5.068765432098769,
+          "mse_improvement_vs_current": 0.0,
+          "mse_improvement_95_interval": [
+            0.0,
+            0.0
+          ],
+          "payoff_improvement_cents_per_session": 0.0,
+          "payoff_improvement_95_interval": [
+            0.0,
+            0.0
+          ]
+        },
+        "short_180": {
+          "sessions": 90,
+          "start": "2026-06-23",
+          "end": "2026-11-04",
+          "mae_cents": 1.7994041420269704,
+          "rmse_cents": 2.371981064619932,
+          "brier_up_all_sessions": 0.09425994513031548,
+          "alerts": 78,
+          "precision": 0.9102564102564102,
+          "payoff_cents_per_session": 4.570000000000003,
+          "payoff_cents_per_alert": 5.2730769230769265,
+          "mse_improvement_vs_current": 0.5926773524339681,
+          "mse_improvement_95_interval": [
+            0.0909517680284149,
+            1.0181214079416756
+          ],
+          "payoff_improvement_cents_per_session": 0.00811111111111145,
+          "payoff_improvement_95_interval": [
+            -0.051458333333333814,
+            0.07800000000000178
+          ]
+        },
+        "recent_weighted_360": {
+          "sessions": 90,
+          "start": "2026-06-23",
+          "end": "2026-11-04",
+          "mae_cents": 1.8106502112094711,
+          "rmse_cents": 2.380306723521739,
+          "brier_up_all_sessions": 0.09440526406035664,
+          "alerts": 81,
+          "precision": 0.9012345679012346,
+          "payoff_cents_per_session": 4.561888888888892,
+          "payoff_cents_per_alert": 5.068765432098769,
+          "mse_improvement_vs_current": 0.5531114253066776,
+          "mse_improvement_95_interval": [
+            0.12968621779618178,
+            0.9300649301958785
+          ],
+          "payoff_improvement_cents_per_session": 0.0,
+          "payoff_improvement_95_interval": [
+            0.0,
+            0.0
+          ]
+        }
+      }
+    },
+    "HO": {
+      "all": {
+        "current_360": {
+          "sessions": 413,
+          "start": "2024-10-07",
+          "end": "2026-11-04",
+          "mae_cents": 1.9743254915991126,
+          "rmse_cents": 3.3922886836923687,
+          "brier_up_all_sessions": 0.08268147670005244,
+          "alerts": 387,
+          "precision": 0.917312661498708,
+          "payoff_cents_per_session": 6.644818401937047,
+          "payoff_cents_per_alert": 7.091240310077522,
+          "mse_improvement_vs_current": 0.0,
+          "mse_improvement_95_interval": [
+            0.0,
+            0.0
+          ],
+          "payoff_improvement_cents_per_session": 0.0,
+          "payoff_improvement_95_interval": [
+            0.0,
+            0.0
+          ]
+        },
+        "short_180": {
+          "sessions": 413,
+          "start": "2024-10-07",
+          "end": "2026-11-04",
+          "mae_cents": 2.0135696696617056,
+          "rmse_cents": 3.4128097793006273,
+          "brier_up_all_sessions": 0.08284248029828922,
+          "alerts": 386,
+          "precision": 0.9196891191709845,
+          "payoff_cents_per_session": 6.6477239709443126,
+          "payoff_cents_per_alert": 7.112720207253889,
+          "mse_improvement_vs_current": -0.1396480761826914,
+          "mse_improvement_95_interval": [
+            -0.4351734864151813,
+            0.07892355715128054
+          ],
+          "payoff_improvement_cents_per_session": 0.0029055690072640325,
+          "payoff_improvement_95_interval": [
+            0.0,
+            0.008716707021792098
+          ]
+        },
+        "recent_weighted_360": {
+          "sessions": 413,
+          "start": "2024-10-07",
+          "end": "2026-11-04",
+          "mae_cents": 2.0056557662725933,
+          "rmse_cents": 3.4025601231620257,
+          "brier_up_all_sessions": 0.0830034402208428,
+          "alerts": 387,
+          "precision": 0.917312661498708,
+          "payoff_cents_per_session": 6.644818401937047,
+          "payoff_cents_per_alert": 7.091240310077522,
+          "mse_improvement_vs_current": -0.06979287822507706,
+          "mse_improvement_95_interval": [
+            -0.43484022248559717,
+            0.20806775750514814
+          ],
+          "payoff_improvement_cents_per_session": 0.0,
+          "payoff_improvement_95_interval": [
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "earlier": {
+        "current_360": {
+          "sessions": 323,
+          "start": "2024-10-07",
+          "end": "2026-06-22",
+          "mae_cents": 1.8983530700254627,
+          "rmse_cents": 3.532943984448797,
+          "brier_up_all_sessions": 0.08515503001333376,
+          "alerts": 303,
+          "precision": 0.9141914191419142,
+          "payoff_cents_per_session": 5.806160990712077,
+          "payoff_cents_per_alert": 6.189405940594061,
+          "mse_improvement_vs_current": 0.0,
+          "mse_improvement_95_interval": [
+            0.0,
+            0.0
+          ],
+          "payoff_improvement_cents_per_session": 0.0,
+          "payoff_improvement_95_interval": [
+            0.0,
+            0.0
+          ]
+        },
+        "short_180": {
+          "sessions": 323,
+          "start": "2024-10-07",
+          "end": "2026-06-22",
+          "mae_cents": 1.9567715854883838,
+          "rmse_cents": 3.5605215503642773,
+          "brier_up_all_sessions": 0.08610051858384796,
+          "alerts": 303,
+          "precision": 0.9141914191419142,
+          "payoff_cents_per_session": 5.806160990712077,
+          "payoff_cents_per_alert": 6.189405940594061,
+          "mse_improvement_vs_current": -0.19562051335549605,
+          "mse_improvement_95_interval": [
+            -0.5896997257477727,
+            0.10517478045219572
+          ],
+          "payoff_improvement_cents_per_session": 0.0,
+          "payoff_improvement_95_interval": [
+            0.0,
+            0.0
+          ]
+        },
+        "recent_weighted_360": {
+          "sessions": 323,
+          "start": "2024-10-07",
+          "end": "2026-06-22",
+          "mae_cents": 1.9445985604025278,
+          "rmse_cents": 3.547358650970062,
+          "brier_up_all_sessions": 0.08550361468103239,
+          "alerts": 303,
+          "precision": 0.9141914191419142,
+          "payoff_cents_per_session": 5.806160990712077,
+          "payoff_cents_per_alert": 6.189405940594061,
+          "mse_improvement_vs_current": -0.10206020135919802,
+          "mse_improvement_95_interval": [
+            -0.5834575839091722,
+            0.2660687906982815
+          ],
+          "payoff_improvement_cents_per_session": 0.0,
+          "payoff_improvement_95_interval": [
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "recent_90": {
+        "current_360": {
+          "sessions": 90,
+          "start": "2026-06-23",
+          "end": "2026-11-04",
+          "mae_cents": 2.2469820712467663,
+          "rmse_cents": 2.8305107418309126,
+          "brier_up_all_sessions": 0.07380416869794285,
+          "alerts": 84,
+          "precision": 0.9285714285714286,
+          "payoff_cents_per_session": 9.654666666666671,
+          "payoff_cents_per_alert": 10.34428571428572,
+          "mse_improvement_vs_current": 0.0,
+          "mse_improvement_95_interval": [
+            0.0,
+            0.0
+          ],
+          "payoff_improvement_cents_per_session": 0.0,
+          "payoff_improvement_95_interval": [
+            0.0,
+            0.0
+          ]
+        },
+        "short_180": {
+          "sessions": 90,
+          "start": "2026-06-23",
+          "end": "2026-11-04",
+          "mae_cents": 2.2174116828615147,
+          "rmse_cents": 2.8196737892794204,
+          "brier_up_all_sessions": 0.07114974289567289,
+          "alerts": 83,
+          "precision": 0.9397590361445783,
+          "payoff_cents_per_session": 9.668000000000005,
+          "payoff_cents_per_alert": 10.48337349397591,
+          "mse_improvement_vs_current": 0.06123078167081862,
+          "mse_improvement_95_interval": [
+            -0.12463125123580282,
+            0.2613861675159696
+          ],
+          "payoff_improvement_cents_per_session": 0.013333333333333839,
+          "payoff_improvement_95_interval": [
+            0.0,
+            0.040000000000001514
+          ]
+        },
+        "recent_weighted_360": {
+          "sessions": 90,
+          "start": "2026-06-23",
+          "end": "2026-11-04",
+          "mae_cents": 2.2247832940062726,
+          "rmse_cents": 2.822371361173974,
+          "brier_up_all_sessions": 0.07403059188038455,
+          "alerts": 84,
+          "precision": 0.9285714285714286,
+          "payoff_cents_per_session": 9.654666666666671,
+          "payoff_cents_per_alert": 10.34428571428572,
+          "mse_improvement_vs_current": 0.04601095924515704,
+          "mse_improvement_95_interval": [
+            -0.0682034913695072,
+            0.2043256384656465
+          ],
+          "payoff_improvement_cents_per_session": 0.0,
+          "payoff_improvement_95_interval": [
+            0.0,
+            0.0
+          ]
+        }
+      }
+    }
+  }
+}

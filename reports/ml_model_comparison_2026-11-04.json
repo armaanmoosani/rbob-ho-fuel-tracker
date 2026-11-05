@@ -1,0 +1,1769 @@
+{
+  "history_sha256": "599deb8cf1be73a2372ef35940eed4e704fef5241554be4ab91bcd2a7e33b34a",
+  "versions": {
+    "numpy": "1.26.4",
+    "pandas": "2.2.1",
+    "sklearn": "1.7.1"
+  },
+  "research_source_sha256": "b79aa8fbc47a6a0a7b67113674b506f805480e043558711b96443b97d9927b1e",
+  "dependency_sources_sha256": {
+    "model.py": "133128d82c37409cbd35b3e901cf93174bd4e6430b1fe5a86570c07158775968",
+    "alignment.py": "b1954bfb087549caaf51d363dc738c4045c21531779bd9b7f842d282eccc94fc",
+    "backtest.py": "e328026dc4f6fa8d02ccb6e3eebe7a1ec0e0ce94fe6b045243051f23ece71444",
+    "futures_util.py": "0e888eb70495d6070bbf296cbf4187b484044c903840abe36a9bd6fcf7715ef3",
+    "scratch/compare_adaptive_models.py": "b8a27ad8700a929ced0cdc7ec45b3a752fb0de996419e1bc8564481d3120df90"
+  },
+  "method": {
+    "candidates": [
+      "production_ols_360",
+      "prequential_ols_360",
+      "huber_360",
+      "ridge_residual",
+      "boosted_residual"
+    ],
+    "features": [
+      "nymex_move_cents",
+      "abs_nymex_move_cents",
+      "prior_basis_cents",
+      "prior_base_error_cents",
+      "prior_base_error_missing",
+      "prior_20_move_std_cents",
+      "season_sin",
+      "season_cos"
+    ],
+    "hyperparameters": {
+      "ridge": {
+        "alpha": 10.0,
+        "solver": "svd"
+      },
+      "huber": {
+        "epsilon": 1.35,
+        "alpha": 0.0001,
+        "max_iter": 1000,
+        "tol": 1e-06
+      },
+      "boosting": {
+        "n_estimators": 60,
+        "max_depth": 2,
+        "min_samples_leaf": 30,
+        "learning_rate": 0.05,
+        "loss": "squared_error",
+        "random_state": 1729
+      }
+    },
+    "rolling_fit_observations": 360,
+    "base_warmup_observations": 120,
+    "correction_min_observations": 80,
+    "purge_observations": 1,
+    "prequential_calibration_observations": 120,
+    "bootstrap_block_observations": 10,
+    "bootstrap_resamples": 2000,
+    "target_confidence": 0.75,
+    "lean_confidence": 0.65,
+    "noise_floor_cents": 0.6,
+    "primary_inference": {
+      "loss": "Full-period paired absolute point-forecast error",
+      "family": "Three ML challengers versus production OLS, separately for RB and HO",
+      "comparisons": 6,
+      "family_alpha": 0.05,
+      "per_comparison_confidence": 0.9916666666666667,
+      "block_sensitivity_observations": [
+        5,
+        10,
+        20
+      ],
+      "bootstrap_resamples": 20000
+    },
+    "qualification": "Reconstructed historical forecasts, not live performance or an untouched holdout. Assumes prior-session rack postings were available by the next decision. Roll exclusions inherit the production calendar-based filter. Correction targets and calibration errors come only from earlier out-of-sample forecasts. All-row probability target is rack_change > 0; zero changes are incorrect directional alerts. Production control retains its original in-sample-residual probability/threshold method; the OLS adapter control uses the same OOS calibration and action rule as ML. All intervals use earlier OOS errors and are empirical, not guaranteed conditional coverage. Full-period primary MAE intervals use a six-test Bonferroni correction and block-length sensitivity; these bootstrap intervals are approximate under dependence. Secondary and subperiod intervals are exploratory and unadjusted for multiple comparisons. Huber estimates a robust location, not a guaranteed conditional mean. Gross timing proxies assume equal volume, exclude inventory/fees, and are not actual savings. No automatic promotion."
+  },
+  "commodities": {
+    "RB": {
+      "all": {
+        "production_ols_360": {
+          "sessions": 413,
+          "start": "2024-10-07",
+          "end": "2026-11-04",
+          "mae_cents": 1.841196587116881,
+          "rmse_cents": 2.983807469998729,
+          "brier_up_all_sessions": 0.12400487209595552,
+          "interval_80_coverage": 0.7506053268765133,
+          "interval_80_mean_width_cents": 4.736516667201053,
+          "interval_80_mean_score_cents": 10.401115643127143,
+          "alerts": 344,
+          "precision": 0.8924418604651163,
+          "wait_alerts": 165,
+          "wrong_waits": 18,
+          "worst_alert_payoff_cents": -7.54999999999999,
+          "payoff_cents_per_session": 3.292251815980631,
+          "changed_actions_vs_production": 0,
+          "vs_production": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": 0.0,
+            "brier_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "payoff_improvement_cents_per_session": 0.0,
+            "payoff_improvement_95_interval": [
+              0.0,
+              0.0
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": 0.001021075132424975,
+            "brier_improvement_95_interval": [
+              -0.0014419617842560439,
+              0.003026264427005949
+            ],
+            "payoff_improvement_cents_per_session": 0.012348668280871762,
+            "payoff_improvement_95_interval": [
+              -0.021653753026634096,
+              0.04387409200968508
+            ]
+          }
+        },
+        "prequential_ols_360": {
+          "sessions": 413,
+          "start": "2024-10-07",
+          "end": "2026-11-04",
+          "mae_cents": 1.841196587116881,
+          "rmse_cents": 2.983807469998729,
+          "brier_up_all_sessions": 0.1250259472283805,
+          "interval_80_coverage": 0.7506053268765133,
+          "interval_80_mean_width_cents": 4.736516667201053,
+          "interval_80_mean_score_cents": 10.401115643127143,
+          "alerts": 342,
+          "precision": 0.8888888888888888,
+          "wait_alerts": 162,
+          "wrong_waits": 18,
+          "worst_alert_payoff_cents": -7.54999999999999,
+          "payoff_cents_per_session": 3.2799031476997587,
+          "changed_actions_vs_production": 10,
+          "vs_production": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": -0.001021075132424975,
+            "brier_improvement_95_interval": [
+              -0.0030262644270059504,
+              0.0014419617842560413
+            ],
+            "payoff_improvement_cents_per_session": -0.012348668280871762,
+            "payoff_improvement_95_interval": [
+              -0.04387409200968508,
+              0.021653753026634057
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": 0.0,
+            "brier_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "payoff_improvement_cents_per_session": 0.0,
+            "payoff_improvement_95_interval": [
+              0.0,
+              0.0
+            ]
+          }
+        },
+        "huber_360": {
+          "sessions": 413,
+          "start": "2024-10-07",
+          "end": "2026-11-04",
+          "mae_cents": 1.6894205801774438,
+          "rmse_cents": 3.0081180083629713,
+          "brier_up_all_sessions": 0.1206385067931308,
+          "interval_80_coverage": 0.7675544794188862,
+          "interval_80_mean_width_cents": 4.108626910928679,
+          "interval_80_mean_score_cents": 10.248131200880188,
+          "alerts": 355,
+          "precision": 0.8845070422535212,
+          "wait_alerts": 172,
+          "wrong_waits": 19,
+          "worst_alert_payoff_cents": -7.54999999999999,
+          "payoff_cents_per_session": 3.317481840193706,
+          "changed_actions_vs_production": 21,
+          "vs_production": {
+            "mae_improvement_cents": 0.15177600693943713,
+            "mae_improvement_95_interval": [
+              0.05476098704942947,
+              0.226009807889159
+            ],
+            "brier_improvement": 0.0033663653028247354,
+            "brier_improvement_95_interval": [
+              -0.0006980325450661124,
+              0.008108983058160752
+            ],
+            "payoff_improvement_cents_per_session": 0.025230024213075027,
+            "payoff_improvement_95_interval": [
+              -0.01595702179176757,
+              0.0712621065375303
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.15177600693943713,
+            "mae_improvement_95_interval": [
+              0.05476098704942947,
+              0.226009807889159
+            ],
+            "brier_improvement": 0.004387440435249711,
+            "brier_improvement_95_interval": [
+              -0.00010528555616215992,
+              0.00892359346500751
+            ],
+            "payoff_improvement_cents_per_session": 0.03757869249394678,
+            "payoff_improvement_95_interval": [
+              -0.0003916464891039667,
+              0.07963740920096851
+            ]
+          }
+        },
+        "ridge_residual": {
+          "sessions": 413,
+          "start": "2024-10-07",
+          "end": "2026-11-04",
+          "mae_cents": 1.9833401874336847,
+          "rmse_cents": 2.948753672572637,
+          "brier_up_all_sessions": 0.14617985219677856,
+          "interval_80_coverage": 0.7675544794188862,
+          "interval_80_mean_width_cents": 5.1337130895263385,
+          "interval_80_mean_score_cents": 10.445086306830397,
+          "alerts": 313,
+          "precision": 0.865814696485623,
+          "wait_alerts": 145,
+          "wrong_waits": 18,
+          "worst_alert_payoff_cents": -7.54999999999999,
+          "payoff_cents_per_session": 3.1960048426150127,
+          "changed_actions_vs_production": 64,
+          "vs_production": {
+            "mae_improvement_cents": -0.14214360031680368,
+            "mae_improvement_95_interval": [
+              -0.30807721054625276,
+              -0.02405600627668771
+            ],
+            "brier_improvement": -0.022174980100823038,
+            "brier_improvement_95_interval": [
+              -0.03652587541359636,
+              -0.007596248083633554
+            ],
+            "payoff_improvement_cents_per_session": -0.09624697336561787,
+            "payoff_improvement_95_interval": [
+              -0.1823892251815982,
+              0.0012463680387400375
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": -0.14214360031680368,
+            "mae_improvement_95_interval": [
+              -0.30807721054625276,
+              -0.02405600627668771
+            ],
+            "brier_improvement": -0.02115390496839806,
+            "brier_improvement_95_interval": [
+              -0.03513996130202703,
+              -0.0073902993480494585
+            ],
+            "payoff_improvement_cents_per_session": -0.0838983050847461,
+            "payoff_improvement_95_interval": [
+              -0.16301876513317215,
+              0.0022439467312344217
+            ]
+          }
+        },
+        "boosted_residual": {
+          "sessions": 413,
+          "start": "2024-10-07",
+          "end": "2026-11-04",
+          "mae_cents": 1.8180726094404072,
+          "rmse_cents": 2.885660399906962,
+          "brier_up_all_sessions": 0.13001497293354322,
+          "interval_80_coverage": 0.7457627118644068,
+          "interval_80_mean_width_cents": 4.55250640087745,
+          "interval_80_mean_score_cents": 10.173517671508947,
+          "alerts": 326,
+          "precision": 0.8926380368098159,
+          "wait_alerts": 158,
+          "wrong_waits": 19,
+          "worst_alert_payoff_cents": -7.54999999999999,
+          "payoff_cents_per_session": 3.289467312348669,
+          "changed_actions_vs_production": 44,
+          "vs_production": {
+            "mae_improvement_cents": 0.023123977676473624,
+            "mae_improvement_95_interval": [
+              -0.07890515266774799,
+              0.10185505526441532
+            ],
+            "brier_improvement": -0.006010100837587674,
+            "brier_improvement_95_interval": [
+              -0.014519785287028618,
+              0.0025432818786978754
+            ],
+            "payoff_improvement_cents_per_session": -0.002784503631961703,
+            "payoff_improvement_95_interval": [
+              -0.055085956416465694,
+              0.062354721549636345
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.023123977676473624,
+            "mae_improvement_95_interval": [
+              -0.07890515266774799,
+              0.10185505526441532
+            ],
+            "brier_improvement": -0.004989025705162699,
+            "brier_improvement_95_interval": [
+              -0.013261738233297954,
+              0.0025201265899387816
+            ],
+            "payoff_improvement_cents_per_session": 0.009564164648910052,
+            "payoff_improvement_95_interval": [
+              -0.042737893462470145,
+              0.0696967312348662
+            ]
+          }
+        }
+      },
+      "earlier": {
+        "production_ols_360": {
+          "sessions": 323,
+          "start": "2024-10-07",
+          "end": "2026-06-22",
+          "mae_cents": 1.8199558388506536,
+          "rmse_cents": 3.1066072408727536,
+          "brier_up_all_sessions": 0.13203299932064366,
+          "interval_80_coverage": 0.7492260061919505,
+          "interval_80_mean_width_cents": 4.288122019089422,
+          "interval_80_mean_score_cents": 10.822245510188429,
+          "alerts": 263,
+          "precision": 0.8897338403041825,
+          "wait_alerts": 131,
+          "wrong_waits": 16,
+          "worst_alert_payoff_cents": -7.54999999999999,
+          "payoff_cents_per_session": 2.9384829721362236,
+          "changed_actions_vs_production": 0,
+          "vs_production": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": 0.0,
+            "brier_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "payoff_improvement_cents_per_session": 0.0,
+            "payoff_improvement_95_interval": [
+              0.0,
+              0.0
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": 0.0011007998927572956,
+            "brier_improvement_95_interval": [
+              -0.0008249563513357663,
+              0.0030635582232945995
+            ],
+            "payoff_improvement_cents_per_session": 0.022291021671826578,
+            "payoff_improvement_95_interval": [
+              -0.01099148606811155,
+              0.0497221362229101
+            ]
+          }
+        },
+        "prequential_ols_360": {
+          "sessions": 323,
+          "start": "2024-10-07",
+          "end": "2026-06-22",
+          "mae_cents": 1.8199558388506536,
+          "rmse_cents": 3.1066072408727536,
+          "brier_up_all_sessions": 0.13313379921340096,
+          "interval_80_coverage": 0.7492260061919505,
+          "interval_80_mean_width_cents": 4.288122019089422,
+          "interval_80_mean_score_cents": 10.822245510188429,
+          "alerts": 263,
+          "precision": 0.8821292775665399,
+          "wait_alerts": 128,
+          "wrong_waits": 16,
+          "worst_alert_payoff_cents": -7.54999999999999,
+          "payoff_cents_per_session": 2.9161919504643974,
+          "changed_actions_vs_production": 8,
+          "vs_production": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": -0.0011007998927572956,
+            "brier_improvement_95_interval": [
+              -0.0030635582232946008,
+              0.000824956351335765
+            ],
+            "payoff_improvement_cents_per_session": -0.022291021671826578,
+            "payoff_improvement_95_interval": [
+              -0.04972213622291011,
+              0.010991486068111546
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": 0.0,
+            "brier_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "payoff_improvement_cents_per_session": 0.0,
+            "payoff_improvement_95_interval": [
+              0.0,
+              0.0
+            ]
+          }
+        },
+        "huber_360": {
+          "sessions": 323,
+          "start": "2024-10-07",
+          "end": "2026-06-22",
+          "mae_cents": 1.6735996150440566,
+          "rmse_cents": 3.167574703987225,
+          "brier_up_all_sessions": 0.12774142741015554,
+          "interval_80_coverage": 0.7708978328173375,
+          "interval_80_mean_width_cents": 3.908521955999378,
+          "interval_80_mean_score_cents": 10.702795498678103,
+          "alerts": 279,
+          "precision": 0.8745519713261649,
+          "wait_alerts": 138,
+          "wrong_waits": 17,
+          "worst_alert_payoff_cents": -7.54999999999999,
+          "payoff_cents_per_session": 2.9619814241486075,
+          "changed_actions_vs_production": 16,
+          "vs_production": {
+            "mae_improvement_cents": 0.146356223806597,
+            "mae_improvement_95_interval": [
+              0.037386374960828715,
+              0.24500115585606852
+            ],
+            "brier_improvement": 0.004291571910488113,
+            "brier_improvement_95_interval": [
+              -0.0010359544771690397,
+              0.009942638336897656
+            ],
+            "payoff_improvement_cents_per_session": 0.023498452012383927,
+            "payoff_improvement_95_interval": [
+              -0.021270897832817066,
+              0.07368808049535581
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.146356223806597,
+            "mae_improvement_95_interval": [
+              0.037386374960828715,
+              0.24500115585606852
+            ],
+            "brier_improvement": 0.005392371803245409,
+            "brier_improvement_95_interval": [
+              8.924537579781316e-05,
+              0.010787432096135807
+            ],
+            "payoff_improvement_cents_per_session": 0.045789473684210505,
+            "payoff_improvement_95_interval": [
+              -0.0012716718266254498,
+              0.09350696594427242
+            ]
+          }
+        },
+        "ridge_residual": {
+          "sessions": 323,
+          "start": "2024-10-07",
+          "end": "2026-06-22",
+          "mae_cents": 1.928280727511744,
+          "rmse_cents": 3.0044078236315,
+          "brier_up_all_sessions": 0.15910845731240064,
+          "interval_80_coverage": 0.7492260061919505,
+          "interval_80_mean_width_cents": 4.6464809304699966,
+          "interval_80_mean_score_cents": 10.709961082210494,
+          "alerts": 244,
+          "precision": 0.8401639344262295,
+          "wait_alerts": 112,
+          "wrong_waits": 16,
+          "worst_alert_payoff_cents": -7.54999999999999,
+          "payoff_cents_per_session": 2.806501547987617,
+          "changed_actions_vs_production": 51,
+          "vs_production": {
+            "mae_improvement_cents": -0.10832488866109062,
+            "mae_improvement_95_interval": [
+              -0.2098100929178942,
+              0.009207584109455894
+            ],
+            "brier_improvement": -0.027075457991756948,
+            "brier_improvement_95_interval": [
+              -0.045593149709960416,
+              -0.009778130970361606
+            ],
+            "payoff_improvement_cents_per_session": -0.13198142414860706,
+            "payoff_improvement_95_interval": [
+              -0.22365789473684267,
+              -0.02927012383900967
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": -0.10832488866109062,
+            "mae_improvement_95_interval": [
+              -0.2098100929178942,
+              0.009207584109455894
+            ],
+            "brier_improvement": -0.025974658098999653,
+            "brier_improvement_95_interval": [
+              -0.044282258547629,
+              -0.008878568046972967
+            ],
+            "payoff_improvement_cents_per_session": -0.10969040247678047,
+            "payoff_improvement_95_interval": [
+              -0.1998900928792576,
+              -0.015090557275542626
+            ]
+          }
+        },
+        "boosted_residual": {
+          "sessions": 323,
+          "start": "2024-10-07",
+          "end": "2026-06-22",
+          "mae_cents": 1.816089871219028,
+          "rmse_cents": 3.0094843093255297,
+          "brier_up_all_sessions": 0.14060041618027713,
+          "interval_80_coverage": 0.7275541795665634,
+          "interval_80_mean_width_cents": 4.20398732563944,
+          "interval_80_mean_score_cents": 10.668124939253843,
+          "alerts": 252,
+          "precision": 0.876984126984127,
+          "wait_alerts": 123,
+          "wrong_waits": 17,
+          "worst_alert_payoff_cents": -7.54999999999999,
+          "payoff_cents_per_session": 2.897554179566564,
+          "changed_actions_vs_production": 36,
+          "vs_production": {
+            "mae_improvement_cents": 0.0038659676316253203,
+            "mae_improvement_95_interval": [
+              -0.10982829271656501,
+              0.08358688865847562
+            ],
+            "brier_improvement": -0.008567416859633437,
+            "brier_improvement_95_interval": [
+              -0.019488241302162146,
+              0.00029881594048337154
+            ],
+            "payoff_improvement_cents_per_session": -0.04092879256965981,
+            "payoff_improvement_95_interval": [
+              -0.0833482972136228,
+              0.0057917956656341005
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.0038659676316253203,
+            "mae_improvement_95_interval": [
+              -0.10982829271656501,
+              0.08358688865847562
+            ],
+            "brier_improvement": -0.00746661696687614,
+            "brier_improvement_95_interval": [
+              -0.01787000065730191,
+              0.0012599864129869559
+            ],
+            "payoff_improvement_cents_per_session": -0.01863777089783324,
+            "payoff_improvement_95_interval": [
+              -0.06811455108359132,
+              0.0265386996904012
+            ]
+          }
+        }
+      },
+      "recent_90": {
+        "production_ols_360": {
+          "sessions": 90,
+          "start": "2026-06-23",
+          "end": "2026-11-04",
+          "mae_cents": 1.9174272725612307,
+          "rmse_cents": 2.4937865833606283,
+          "brier_up_all_sessions": 0.09519281550068587,
+          "interval_80_coverage": 0.7555555555555555,
+          "interval_80_mean_width_cents": 6.3457552376461255,
+          "interval_80_mean_score_cents": 8.88972734245164,
+          "alerts": 81,
+          "precision": 0.9012345679012346,
+          "wait_alerts": 34,
+          "wrong_waits": 2,
+          "worst_alert_payoff_cents": -4.560000000000031,
+          "payoff_cents_per_session": 4.561888888888892,
+          "changed_actions_vs_production": 0,
+          "vs_production": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": 0.0,
+            "brier_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "payoff_improvement_cents_per_session": 0.0,
+            "payoff_improvement_95_interval": [
+              0.0,
+              0.0
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": 0.0007349518258989797,
+            "brier_improvement_95_interval": [
+              -0.007188437809664973,
+              0.006233261950257108
+            ],
+            "payoff_improvement_cents_per_session": -0.023333333333332738,
+            "payoff_improvement_95_interval": [
+              -0.126333333333332,
+              0.03755555555555586
+            ]
+          }
+        },
+        "prequential_ols_360": {
+          "sessions": 90,
+          "start": "2026-06-23",
+          "end": "2026-11-04",
+          "mae_cents": 1.9174272725612307,
+          "rmse_cents": 2.4937865833606283,
+          "brier_up_all_sessions": 0.09592776732658488,
+          "interval_80_coverage": 0.7555555555555555,
+          "interval_80_mean_width_cents": 6.3457552376461255,
+          "interval_80_mean_score_cents": 8.88972734245164,
+          "alerts": 79,
+          "precision": 0.9113924050632911,
+          "wait_alerts": 34,
+          "wrong_waits": 2,
+          "worst_alert_payoff_cents": -4.560000000000031,
+          "payoff_cents_per_session": 4.5852222222222245,
+          "changed_actions_vs_production": 2,
+          "vs_production": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": -0.0007349518258989797,
+            "brier_improvement_95_interval": [
+              -0.0062332619502571155,
+              0.00718843780966497
+            ],
+            "payoff_improvement_cents_per_session": 0.023333333333332738,
+            "payoff_improvement_95_interval": [
+              -0.03755555555555586,
+              0.126333333333332
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": 0.0,
+            "brier_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "payoff_improvement_cents_per_session": 0.0,
+            "payoff_improvement_95_interval": [
+              0.0,
+              0.0
+            ]
+          }
+        },
+        "huber_360": {
+          "sessions": 90,
+          "start": "2026-06-23",
+          "end": "2026-11-04",
+          "mae_cents": 1.7462002661561564,
+          "rmse_cents": 2.348317629588825,
+          "brier_up_all_sessions": 0.09514691391203083,
+          "interval_80_coverage": 0.7555555555555555,
+          "interval_80_mean_width_cents": 4.826781360286063,
+          "interval_80_mean_score_cents": 8.616391554338776,
+          "alerts": 76,
+          "precision": 0.9210526315789473,
+          "wait_alerts": 34,
+          "wrong_waits": 2,
+          "worst_alert_payoff_cents": -4.560000000000031,
+          "payoff_cents_per_session": 4.5933333333333355,
+          "changed_actions_vs_production": 5,
+          "vs_production": {
+            "mae_improvement_cents": 0.17122700640507446,
+            "mae_improvement_95_interval": [
+              0.0350692682875655,
+              0.3124055401875443
+            ],
+            "brier_improvement": 4.590158865505817e-05,
+            "brier_improvement_95_interval": [
+              -0.0029317039817570423,
+              0.0036567442289876695
+            ],
+            "payoff_improvement_cents_per_session": 0.03144444444444419,
+            "payoff_improvement_95_interval": [
+              -0.06436111111111167,
+              0.15668888888888685
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.17122700640507446,
+            "mae_improvement_95_interval": [
+              0.0350692682875655,
+              0.3124055401875443
+            ],
+            "brier_improvement": 0.0007808534145540371,
+            "brier_improvement_95_interval": [
+              -0.006131490937322698,
+              0.0060718818119382505
+            ],
+            "payoff_improvement_cents_per_session": 0.00811111111111145,
+            "payoff_improvement_95_interval": [
+              -0.051458333333333814,
+              0.07800000000000178
+            ]
+          }
+        },
+        "ridge_residual": {
+          "sessions": 90,
+          "start": "2026-06-23",
+          "end": "2026-11-04",
+          "mae_cents": 2.1809424713757606,
+          "rmse_cents": 2.739723379687114,
+          "brier_up_all_sessions": 0.09978052494849056,
+          "interval_80_coverage": 0.8333333333333334,
+          "interval_80_mean_width_cents": 6.882335171472989,
+          "interval_80_mean_score_cents": 9.49448016852182,
+          "alerts": 69,
+          "precision": 0.9565217391304348,
+          "wait_alerts": 33,
+          "wrong_waits": 2,
+          "worst_alert_payoff_cents": -3.240000000000043,
+          "payoff_cents_per_session": 4.593888888888891,
+          "changed_actions_vs_production": 13,
+          "vs_production": {
+            "mae_improvement_cents": -0.2635151988145295,
+            "mae_improvement_95_interval": [
+              -0.8777776768697905,
+              0.10888888397922906
+            ],
+            "brier_improvement": -0.004587709447804678,
+            "brier_improvement_95_interval": [
+              -0.024030615645882804,
+              0.02691253476300397
+            ],
+            "payoff_improvement_cents_per_session": 0.031999999999998946,
+            "payoff_improvement_95_interval": [
+              -0.17411944444444524,
+              0.28633888888888614
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": -0.2635151988145295,
+            "mae_improvement_95_interval": [
+              -0.8777776768697905,
+              0.10888888397922906
+            ],
+            "brier_improvement": -0.003852757621905698,
+            "brier_improvement_95_interval": [
+              -0.01904731777598614,
+              0.020933907402430625
+            ],
+            "payoff_improvement_cents_per_session": 0.008666666666666205,
+            "payoff_improvement_95_interval": [
+              -0.1779333333333337,
+              0.22755555555555518
+            ]
+          }
+        },
+        "boosted_residual": {
+          "sessions": 90,
+          "start": "2026-06-23",
+          "end": "2026-11-04",
+          "mae_cents": 1.82518843661269,
+          "rmse_cents": 2.3889937414327584,
+          "brier_up_all_sessions": 0.09202499328137599,
+          "interval_80_coverage": 0.8111111111111111,
+          "interval_80_mean_width_cents": 5.803302637564969,
+          "interval_80_mean_score_cents": 8.39842714393558,
+          "alerts": 74,
+          "precision": 0.9459459459459459,
+          "wait_alerts": 35,
+          "wrong_waits": 2,
+          "worst_alert_payoff_cents": -1.100000000000012,
+          "payoff_cents_per_session": 4.696000000000002,
+          "changed_actions_vs_production": 8,
+          "vs_production": {
+            "mae_improvement_cents": 0.09223883594854036,
+            "mae_improvement_95_interval": [
+              -0.08434201826066849,
+              0.25574223176284694
+            ],
+            "brier_improvement": 0.003167822219309895,
+            "brier_improvement_95_interval": [
+              -0.014418528509476483,
+              0.02404135428117818
+            ],
+            "payoff_improvement_cents_per_session": 0.1341111111111104,
+            "payoff_improvement_95_interval": [
+              -0.03449166666666732,
+              0.3642555555555542
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.09223883594854036,
+            "mae_improvement_95_interval": [
+              -0.08434201826066849,
+              0.25574223176284694
+            ],
+            "brier_improvement": 0.0039027740452088743,
+            "brier_improvement_95_interval": [
+              -0.009936714294245867,
+              0.018186718026814753
+            ],
+            "payoff_improvement_cents_per_session": 0.11077777777777767,
+            "payoff_improvement_95_interval": [
+              -0.03411944444444489,
+              0.29857500000000037
+            ]
+          }
+        }
+      },
+      "primary_inference": {
+        "huber_360": {
+          "mae_improvement_cents": 0.15177600693943713,
+          "bonferroni_6_comparison_intervals": {
+            "5": [
+              0.03283161834031791,
+              0.2670657706413598
+            ],
+            "10": [
+              0.02902191751680645,
+              0.25636128722339363
+            ],
+            "20": [
+              0.014496231229909291,
+              0.2672012713008453
+            ]
+          },
+          "positive_lower_bound_at_all_block_lengths": true
+        },
+        "ridge_residual": {
+          "mae_improvement_cents": -0.14214360031680368,
+          "bonferroni_6_comparison_intervals": {
+            "5": [
+              -0.3220100286570171,
+              0.012237489084513392
+            ],
+            "10": [
+              -0.36008164923496216,
+              0.01670734953449089
+            ],
+            "20": [
+              -0.38196983226108494,
+              0.009504307775671642
+            ]
+          },
+          "positive_lower_bound_at_all_block_lengths": false
+        },
+        "boosted_residual": {
+          "mae_improvement_cents": 0.023123977676473624,
+          "bonferroni_6_comparison_intervals": {
+            "5": [
+              -0.11144752886594335,
+              0.13903613211024354
+            ],
+            "10": [
+              -0.11491286278055524,
+              0.12312544962517157
+            ],
+            "20": [
+              -0.10761022502780182,
+              0.11209314777686324
+            ]
+          },
+          "positive_lower_bound_at_all_block_lengths": false
+        }
+      }
+    },
+    "HO": {
+      "all": {
+        "production_ols_360": {
+          "sessions": 413,
+          "start": "2024-10-07",
+          "end": "2026-11-04",
+          "mae_cents": 1.9743254915991126,
+          "rmse_cents": 3.3922886836923687,
+          "brier_up_all_sessions": 0.08268147670005244,
+          "interval_80_coverage": 0.7312348668280871,
+          "interval_80_mean_width_cents": 4.66159332012429,
+          "interval_80_mean_score_cents": 12.485127442579891,
+          "alerts": 387,
+          "precision": 0.917312661498708,
+          "wait_alerts": 181,
+          "wrong_waits": 15,
+          "worst_alert_payoff_cents": -9.060000000000024,
+          "payoff_cents_per_session": 6.644818401937047,
+          "changed_actions_vs_production": 0,
+          "vs_production": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": 0.0,
+            "brier_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "payoff_improvement_cents_per_session": 0.0,
+            "payoff_improvement_95_interval": [
+              0.0,
+              0.0
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": -0.0007952775021227608,
+            "brier_improvement_95_interval": [
+              -0.0032917012107788884,
+              0.0015839140312488584
+            ],
+            "payoff_improvement_cents_per_session": 0.004358353510895619,
+            "payoff_improvement_95_interval": [
+              -0.008716707021792098,
+              0.021791767554478956
+            ]
+          }
+        },
+        "prequential_ols_360": {
+          "sessions": 413,
+          "start": "2024-10-07",
+          "end": "2026-11-04",
+          "mae_cents": 1.9743254915991126,
+          "rmse_cents": 3.3922886836923687,
+          "brier_up_all_sessions": 0.08188619919792968,
+          "interval_80_coverage": 0.7312348668280871,
+          "interval_80_mean_width_cents": 4.66159332012429,
+          "interval_80_mean_score_cents": 12.485127442579891,
+          "alerts": 385,
+          "precision": 0.9194805194805195,
+          "wait_alerts": 181,
+          "wrong_waits": 15,
+          "worst_alert_payoff_cents": -9.060000000000024,
+          "payoff_cents_per_session": 6.640460048426153,
+          "changed_actions_vs_production": 2,
+          "vs_production": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": 0.0007952775021227608,
+            "brier_improvement_95_interval": [
+              -0.0015839140312488588,
+              0.0032917012107788854
+            ],
+            "payoff_improvement_cents_per_session": -0.004358353510895619,
+            "payoff_improvement_95_interval": [
+              -0.021791767554478956,
+              0.008716707021792098
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": 0.0,
+            "brier_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "payoff_improvement_cents_per_session": 0.0,
+            "payoff_improvement_95_interval": [
+              0.0,
+              0.0
+            ]
+          }
+        },
+        "huber_360": {
+          "sessions": 413,
+          "start": "2024-10-07",
+          "end": "2026-11-04",
+          "mae_cents": 1.9271458699706363,
+          "rmse_cents": 3.3691514016060227,
+          "brier_up_all_sessions": 0.08122360947257662,
+          "interval_80_coverage": 0.7215496368038741,
+          "interval_80_mean_width_cents": 4.598159308343832,
+          "interval_80_mean_score_cents": 12.406481628056357,
+          "alerts": 385,
+          "precision": 0.9194805194805195,
+          "wait_alerts": 181,
+          "wrong_waits": 15,
+          "worst_alert_payoff_cents": -9.060000000000024,
+          "payoff_cents_per_session": 6.640460048426153,
+          "changed_actions_vs_production": 2,
+          "vs_production": {
+            "mae_improvement_cents": 0.04717962162847601,
+            "mae_improvement_95_interval": [
+              0.006396588852055522,
+              0.09207983680060855
+            ],
+            "brier_improvement": 0.001457867227475823,
+            "brier_improvement_95_interval": [
+              -0.0008547167511626373,
+              0.00403588064859865
+            ],
+            "payoff_improvement_cents_per_session": -0.004358353510895619,
+            "payoff_improvement_95_interval": [
+              -0.021791767554478956,
+              0.008716707021792098
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.04717962162847601,
+            "mae_improvement_95_interval": [
+              0.006396588852055522,
+              0.09207983680060855
+            ],
+            "brier_improvement": 0.0006625897253530622,
+            "brier_improvement_95_interval": [
+              -0.0007116861110912281,
+              0.001826880092245242
+            ],
+            "payoff_improvement_cents_per_session": 0.0,
+            "payoff_improvement_95_interval": [
+              0.0,
+              0.0
+            ]
+          }
+        },
+        "ridge_residual": {
+          "sessions": 413,
+          "start": "2024-10-07",
+          "end": "2026-11-04",
+          "mae_cents": 2.1559788080771813,
+          "rmse_cents": 3.525569674280362,
+          "brier_up_all_sessions": 0.08182893634908994,
+          "interval_80_coverage": 0.7554479418886199,
+          "interval_80_mean_width_cents": 5.371318401723817,
+          "interval_80_mean_score_cents": 13.486106310118547,
+          "alerts": 375,
+          "precision": 0.9253333333333333,
+          "wait_alerts": 179,
+          "wrong_waits": 15,
+          "worst_alert_payoff_cents": -8.429999999999982,
+          "payoff_cents_per_session": 6.663995157384991,
+          "changed_actions_vs_production": 19,
+          "vs_production": {
+            "mae_improvement_cents": -0.18165331647806904,
+            "mae_improvement_95_interval": [
+              -0.3534178958947689,
+              -0.014040890526819493
+            ],
+            "brier_improvement": 0.0008525403509625045,
+            "brier_improvement_95_interval": [
+              -0.008317040511529534,
+              0.00987892242130705
+            ],
+            "payoff_improvement_cents_per_session": 0.019176755447942142,
+            "payoff_improvement_95_interval": [
+              -0.08787530266343854,
+              0.15051937046004857
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": -0.18165331647806904,
+            "mae_improvement_95_interval": [
+              -0.3534178958947689,
+              -0.014040890526819493
+            ],
+            "brier_improvement": 5.726284883974353e-05,
+            "brier_improvement_95_interval": [
+              -0.008022858613471217,
+              0.00805713498350114
+            ],
+            "payoff_improvement_cents_per_session": 0.02353510895883776,
+            "payoff_improvement_95_interval": [
+              -0.08538922518159875,
+              0.1548898305084744
+            ]
+          }
+        },
+        "boosted_residual": {
+          "sessions": 413,
+          "start": "2024-10-07",
+          "end": "2026-11-04",
+          "mae_cents": 2.089091004688748,
+          "rmse_cents": 3.4027701189112594,
+          "brier_up_all_sessions": 0.08628388838169333,
+          "interval_80_coverage": 0.7191283292978208,
+          "interval_80_mean_width_cents": 4.979573540669241,
+          "interval_80_mean_score_cents": 12.750876433511296,
+          "alerts": 369,
+          "precision": 0.924119241192412,
+          "wait_alerts": 173,
+          "wrong_waits": 13,
+          "worst_alert_payoff_cents": -8.429999999999982,
+          "payoff_cents_per_session": 6.626658595641647,
+          "changed_actions_vs_production": 21,
+          "vs_production": {
+            "mae_improvement_cents": -0.11476551308963553,
+            "mae_improvement_95_interval": [
+              -0.21357561241430145,
+              -0.018719236401230983
+            ],
+            "brier_improvement": -0.00360241168164088,
+            "brier_improvement_95_interval": [
+              -0.01228625477673096,
+              0.0039055728624369955
+            ],
+            "payoff_improvement_cents_per_session": -0.018159806295399452,
+            "payoff_improvement_95_interval": [
+              -0.11243825665859546,
+              0.09542251815980672
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": -0.11476551308963553,
+            "mae_improvement_95_interval": [
+              -0.21357561241430145,
+              -0.018719236401230983
+            ],
+            "brier_improvement": -0.0043976891837636395,
+            "brier_improvement_95_interval": [
+              -0.012470071214161101,
+              0.0023693032412724535
+            ],
+            "payoff_improvement_cents_per_session": -0.013801452784503832,
+            "payoff_improvement_95_interval": [
+              -0.10774939467312356,
+              0.10326755447941857
+            ]
+          }
+        }
+      },
+      "earlier": {
+        "production_ols_360": {
+          "sessions": 323,
+          "start": "2024-10-07",
+          "end": "2026-06-22",
+          "mae_cents": 1.8983530700254627,
+          "rmse_cents": 3.532943984448797,
+          "brier_up_all_sessions": 0.08515503001333376,
+          "interval_80_coverage": 0.7244582043343654,
+          "interval_80_mean_width_cents": 4.096926086981256,
+          "interval_80_mean_score_cents": 13.047526884280929,
+          "alerts": 303,
+          "precision": 0.9141914191419142,
+          "wait_alerts": 144,
+          "wrong_waits": 14,
+          "worst_alert_payoff_cents": -9.060000000000024,
+          "payoff_cents_per_session": 5.806160990712077,
+          "changed_actions_vs_production": 0,
+          "vs_production": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": 0.0,
+            "brier_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "payoff_improvement_cents_per_session": 0.0,
+            "payoff_improvement_95_interval": [
+              0.0,
+              0.0
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": 0.0004260956037188168,
+            "brier_improvement_95_interval": [
+              -0.0019419788181693708,
+              0.002372916207289319
+            ],
+            "payoff_improvement_cents_per_session": 0.0,
+            "payoff_improvement_95_interval": [
+              0.0,
+              0.0
+            ]
+          }
+        },
+        "prequential_ols_360": {
+          "sessions": 323,
+          "start": "2024-10-07",
+          "end": "2026-06-22",
+          "mae_cents": 1.8983530700254627,
+          "rmse_cents": 3.532943984448797,
+          "brier_up_all_sessions": 0.08558112561705257,
+          "interval_80_coverage": 0.7244582043343654,
+          "interval_80_mean_width_cents": 4.096926086981256,
+          "interval_80_mean_score_cents": 13.047526884280929,
+          "alerts": 303,
+          "precision": 0.9141914191419142,
+          "wait_alerts": 144,
+          "wrong_waits": 14,
+          "worst_alert_payoff_cents": -9.060000000000024,
+          "payoff_cents_per_session": 5.806160990712077,
+          "changed_actions_vs_production": 0,
+          "vs_production": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": -0.0004260956037188168,
+            "brier_improvement_95_interval": [
+              -0.0023729162072893195,
+              0.00194197881816937
+            ],
+            "payoff_improvement_cents_per_session": 0.0,
+            "payoff_improvement_95_interval": [
+              0.0,
+              0.0
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": 0.0,
+            "brier_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "payoff_improvement_cents_per_session": 0.0,
+            "payoff_improvement_95_interval": [
+              0.0,
+              0.0
+            ]
+          }
+        },
+        "huber_360": {
+          "sessions": 323,
+          "start": "2024-10-07",
+          "end": "2026-06-22",
+          "mae_cents": 1.8533632990777025,
+          "rmse_cents": 3.51080834187282,
+          "brier_up_all_sessions": 0.08489033458331634,
+          "interval_80_coverage": 0.7151702786377709,
+          "interval_80_mean_width_cents": 4.048867760856243,
+          "interval_80_mean_score_cents": 13.015567510082835,
+          "alerts": 303,
+          "precision": 0.9141914191419142,
+          "wait_alerts": 144,
+          "wrong_waits": 14,
+          "worst_alert_payoff_cents": -9.060000000000024,
+          "payoff_cents_per_session": 5.806160990712077,
+          "changed_actions_vs_production": 0,
+          "vs_production": {
+            "mae_improvement_cents": 0.0449897709477605,
+            "mae_improvement_95_interval": [
+              -0.00459372384620111,
+              0.10405272637150659
+            ],
+            "brier_improvement": 0.000264695430017413,
+            "brier_improvement_95_interval": [
+              -0.0018862714950736439,
+              0.0026462507667495538
+            ],
+            "payoff_improvement_cents_per_session": 0.0,
+            "payoff_improvement_95_interval": [
+              0.0,
+              0.0
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.0449897709477605,
+            "mae_improvement_95_interval": [
+              -0.00459372384620111,
+              0.10405272637150659
+            ],
+            "brier_improvement": 0.0006907910337362297,
+            "brier_improvement_95_interval": [
+              -0.00109537492418147,
+              0.002106543440584481
+            ],
+            "payoff_improvement_cents_per_session": 0.0,
+            "payoff_improvement_95_interval": [
+              0.0,
+              0.0
+            ]
+          }
+        },
+        "ridge_residual": {
+          "sessions": 323,
+          "start": "2024-10-07",
+          "end": "2026-06-22",
+          "mae_cents": 2.0985455921738105,
+          "rmse_cents": 3.657178878533748,
+          "brier_up_all_sessions": 0.08784777719628283,
+          "interval_80_coverage": 0.7461300309597523,
+          "interval_80_mean_width_cents": 4.565172941132128,
+          "interval_80_mean_score_cents": 13.87396431504521,
+          "alerts": 295,
+          "precision": 0.9186440677966101,
+          "wait_alerts": 140,
+          "wrong_waits": 13,
+          "worst_alert_payoff_cents": -8.429999999999982,
+          "payoff_cents_per_session": 5.870835913312695,
+          "changed_actions_vs_production": 13,
+          "vs_production": {
+            "mae_improvement_cents": -0.2001925221483479,
+            "mae_improvement_95_interval": [
+              -0.39473154568403174,
+              -0.03373197034012427
+            ],
+            "brier_improvement": -0.002692747182949075,
+            "brier_improvement_95_interval": [
+              -0.012304221064936291,
+              0.007964972496612308
+            ],
+            "payoff_improvement_cents_per_session": 0.06467492260061955,
+            "payoff_improvement_95_interval": [
+              -0.04613931888544851,
+              0.23595433436532548
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": -0.2001925221483479,
+            "mae_improvement_95_interval": [
+              -0.39473154568403174,
+              -0.03373197034012427
+            ],
+            "brier_improvement": -0.0022666515792302603,
+            "brier_improvement_95_interval": [
+              -0.011098615672240972,
+              0.006854998573072418
+            ],
+            "payoff_improvement_cents_per_session": 0.06467492260061955,
+            "payoff_improvement_95_interval": [
+              -0.04613931888544851,
+              0.23595433436532548
+            ]
+          }
+        },
+        "boosted_residual": {
+          "sessions": 323,
+          "start": "2024-10-07",
+          "end": "2026-06-22",
+          "mae_cents": 2.0573796844456442,
+          "rmse_cents": 3.547172271792689,
+          "brier_up_all_sessions": 0.09203058866794855,
+          "interval_80_coverage": 0.6965944272445821,
+          "interval_80_mean_width_cents": 4.307560376057562,
+          "interval_80_mean_score_cents": 13.21755092701317,
+          "alerts": 292,
+          "precision": 0.9178082191780822,
+          "wait_alerts": 136,
+          "wrong_waits": 12,
+          "worst_alert_payoff_cents": -8.429999999999982,
+          "payoff_cents_per_session": 5.821052631578948,
+          "changed_actions_vs_production": 14,
+          "vs_production": {
+            "mae_improvement_cents": -0.1590266144201815,
+            "mae_improvement_95_interval": [
+              -0.27578205373494286,
+              -0.053103650585956605
+            ],
+            "brier_improvement": -0.006875558654614785,
+            "brier_improvement_95_interval": [
+              -0.01710080985034891,
+              0.003100906048338927
+            ],
+            "payoff_improvement_cents_per_session": 0.014891640866873286,
+            "payoff_improvement_95_interval": [
+              -0.09124148606811096,
+              0.16378792569659514
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": -0.1590266144201815,
+            "mae_improvement_95_interval": [
+              -0.27578205373494286,
+              -0.053103650585956605
+            ],
+            "brier_improvement": -0.006449463050895969,
+            "brier_improvement_95_interval": [
+              -0.01596485993228958,
+              0.002287233865526008
+            ],
+            "payoff_improvement_cents_per_session": 0.014891640866873286,
+            "payoff_improvement_95_interval": [
+              -0.09124148606811096,
+              0.16378792569659514
+            ]
+          }
+        }
+      },
+      "recent_90": {
+        "production_ols_360": {
+          "sessions": 90,
+          "start": "2026-06-23",
+          "end": "2026-11-04",
+          "mae_cents": 2.2469820712467663,
+          "rmse_cents": 2.8305107418309126,
+          "brier_up_all_sessions": 0.07380416869794285,
+          "interval_80_coverage": 0.7555555555555555,
+          "interval_80_mean_width_cents": 6.688121279070958,
+          "interval_80_mean_score_cents": 10.466738335141715,
+          "alerts": 84,
+          "precision": 0.9285714285714286,
+          "wait_alerts": 37,
+          "wrong_waits": 1,
+          "worst_alert_payoff_cents": -1.869999999999994,
+          "payoff_cents_per_session": 9.654666666666671,
+          "changed_actions_vs_production": 0,
+          "vs_production": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": 0.0,
+            "brier_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "payoff_improvement_cents_per_session": 0.0,
+            "payoff_improvement_95_interval": [
+              0.0,
+              0.0
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": -0.005178649870865312,
+            "brier_improvement_95_interval": [
+              -0.014472211644152272,
+              0.0006531702295537367
+            ],
+            "payoff_improvement_cents_per_session": 0.019999999999998783,
+            "payoff_improvement_95_interval": [
+              -0.040000000000001514,
+              0.09999999999999787
+            ]
+          }
+        },
+        "prequential_ols_360": {
+          "sessions": 90,
+          "start": "2026-06-23",
+          "end": "2026-11-04",
+          "mae_cents": 2.2469820712467663,
+          "rmse_cents": 2.8305107418309126,
+          "brier_up_all_sessions": 0.06862551882707754,
+          "interval_80_coverage": 0.7555555555555555,
+          "interval_80_mean_width_cents": 6.688121279070958,
+          "interval_80_mean_score_cents": 10.466738335141715,
+          "alerts": 82,
+          "precision": 0.9390243902439024,
+          "wait_alerts": 37,
+          "wrong_waits": 1,
+          "worst_alert_payoff_cents": -1.869999999999994,
+          "payoff_cents_per_session": 9.634666666666671,
+          "changed_actions_vs_production": 2,
+          "vs_production": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": 0.005178649870865312,
+            "brier_improvement_95_interval": [
+              -0.0006531702295537379,
+              0.014472211644152268
+            ],
+            "payoff_improvement_cents_per_session": -0.019999999999998783,
+            "payoff_improvement_95_interval": [
+              -0.09999999999999787,
+              0.040000000000001514
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.0,
+            "mae_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "brier_improvement": 0.0,
+            "brier_improvement_95_interval": [
+              0.0,
+              0.0
+            ],
+            "payoff_improvement_cents_per_session": 0.0,
+            "payoff_improvement_95_interval": [
+              0.0,
+              0.0
+            ]
+          }
+        },
+        "huber_360": {
+          "sessions": 90,
+          "start": "2026-06-23",
+          "end": "2026-11-04",
+          "mae_cents": 2.191943318841944,
+          "rmse_cents": 2.8024045786734657,
+          "brier_up_all_sessions": 0.06806414046403296,
+          "interval_80_coverage": 0.7444444444444445,
+          "interval_80_mean_width_cents": 6.569505639882627,
+          "interval_80_mean_score_cents": 10.220540073672451,
+          "alerts": 82,
+          "precision": 0.9390243902439024,
+          "wait_alerts": 37,
+          "wrong_waits": 1,
+          "worst_alert_payoff_cents": -1.869999999999994,
+          "payoff_cents_per_session": 9.634666666666671,
+          "changed_actions_vs_production": 2,
+          "vs_production": {
+            "mae_improvement_cents": 0.05503875240482165,
+            "mae_improvement_95_interval": [
+              -0.0035363855350520976,
+              0.10459510425031258
+            ],
+            "brier_improvement": 0.005740028233909896,
+            "brier_improvement_95_interval": [
+              0.0003632792942875207,
+              0.014081106818384854
+            ],
+            "payoff_improvement_cents_per_session": -0.019999999999998783,
+            "payoff_improvement_95_interval": [
+              -0.09999999999999787,
+              0.040000000000001514
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.05503875240482165,
+            "mae_improvement_95_interval": [
+              -0.0035363855350520976,
+              0.10459510425031258
+            ],
+            "brier_improvement": 0.0005613783630445838,
+            "brier_improvement_95_interval": [
+              -0.0010585938666427739,
+              0.0022209904744841594
+            ],
+            "payoff_improvement_cents_per_session": 0.0,
+            "payoff_improvement_95_interval": [
+              0.0,
+              0.0
+            ]
+          }
+        },
+        "ridge_residual": {
+          "sessions": 90,
+          "start": "2026-06-23",
+          "end": "2026-11-04",
+          "mae_cents": 2.3621002384859455,
+          "rmse_cents": 3.0061616856607984,
+          "brier_up_all_sessions": 0.0602279853086088,
+          "interval_80_coverage": 0.7888888888888889,
+          "interval_80_mean_width_cents": 8.264484888069548,
+          "interval_80_mean_score_cents": 12.094127025770659,
+          "alerts": 80,
+          "precision": 0.95,
+          "wait_alerts": 39,
+          "wrong_waits": 2,
+          "worst_alert_payoff_cents": -6.590000000000007,
+          "payoff_cents_per_session": 9.510555555555563,
+          "changed_actions_vs_production": 6,
+          "vs_production": {
+            "mae_improvement_cents": -0.11511816723917916,
+            "mae_improvement_95_interval": [
+              -0.5483834902209797,
+              0.25855735953727044
+            ],
+            "brier_improvement": 0.013576183389334065,
+            "brier_improvement_95_interval": [
+              -0.0057595287213306045,
+              0.03403944997184274
+            ],
+            "payoff_improvement_cents_per_session": -0.14411111111111127,
+            "payoff_improvement_95_interval": [
+              -0.40311666666666923,
+              0.037333333333334155
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": -0.11511816723917916,
+            "mae_improvement_95_interval": [
+              -0.5483834902209797,
+              0.25855735953727044
+            ],
+            "brier_improvement": 0.008397533518468751,
+            "brier_improvement_95_interval": [
+              -0.007823800352354507,
+              0.024276105586909118
+            ],
+            "payoff_improvement_cents_per_session": -0.12411111111111249,
+            "payoff_improvement_95_interval": [
+              -0.38200000000000384,
+              0.036000000000000476
+            ]
+          }
+        },
+        "boosted_residual": {
+          "sessions": 90,
+          "start": "2026-06-23",
+          "end": "2026-11-04",
+          "mae_cents": 2.20289940956122,
+          "rmse_cents": 2.8243731212132386,
+          "brier_up_all_sessions": 0.06565961957657739,
+          "interval_80_coverage": 0.8,
+          "interval_80_mean_width_cents": 7.391354120331157,
+          "interval_80_mean_score_cents": 11.076033529054572,
+          "alerts": 77,
+          "precision": 0.948051948051948,
+          "wait_alerts": 37,
+          "wrong_waits": 1,
+          "worst_alert_payoff_cents": -1.869999999999994,
+          "payoff_cents_per_session": 9.517888888888894,
+          "changed_actions_vs_production": 7,
+          "vs_production": {
+            "mae_improvement_cents": 0.04408266168554612,
+            "mae_improvement_95_interval": [
+              -0.12827257206166426,
+              0.22363113863705242
+            ],
+            "brier_improvement": 0.008144549121365472,
+            "brier_improvement_95_interval": [
+              -0.0033549759795715255,
+              0.019721293747573424
+            ],
+            "payoff_improvement_cents_per_session": -0.13677777777777825,
+            "payoff_improvement_95_interval": [
+              -0.3148027777777789,
+              -0.0022166666666664655
+            ]
+          },
+          "vs_same_adapter_ols": {
+            "mae_improvement_cents": 0.04408266168554612,
+            "mae_improvement_95_interval": [
+              -0.12827257206166426,
+              0.22363113863705242
+            ],
+            "brier_improvement": 0.0029658992505001616,
+            "brier_improvement_95_interval": [
+              -0.005791696527217892,
+              0.010608614022514834
+            ],
+            "payoff_improvement_cents_per_session": -0.11677777777777948,
+            "payoff_improvement_95_interval": [
+              -0.2812805555555579,
+              -0.005222222222222881
+            ]
+          }
+        }
+      },
+      "primary_inference": {
+        "huber_360": {
+          "mae_improvement_cents": 0.04717962162847601,
+          "bonferroni_6_comparison_intervals": {
+            "5": [
+              -0.008916068691041099,
+              0.10881172726069749
+            ],
+            "10": [
+              -0.006694586481912987,
+              0.11296807122547979
+            ],
+            "20": [
+              -0.006909542992396164,
+              0.11132525904070623
+            ]
+          },
+          "positive_lower_bound_at_all_block_lengths": false
+        },
+        "ridge_residual": {
+          "mae_improvement_cents": -0.18165331647806904,
+          "bonferroni_6_comparison_intervals": {
+            "5": [
+              -0.39234139470014895,
+              0.01695645582832343
+            ],
+            "10": [
+              -0.4190330783697431,
+              0.03270271531225354
+            ],
+            "20": [
+              -0.46803190045009624,
+              0.0663511678892019
+            ]
+          },
+          "positive_lower_bound_at_all_block_lengths": false
+        },
+        "boosted_residual": {
+          "mae_improvement_cents": -0.11476551308963553,
+          "bonferroni_6_comparison_intervals": {
+            "5": [
+              -0.24856104816646807,
+              0.007736681754876239
+            ],
+            "10": [
+              -0.2543441451132098,
+              0.009761459241642503
+            ],
+            "20": [
+              -0.27550897376553257,
+              0.0090697740931191
+            ]
+          },
+          "positive_lower_bound_at_all_block_lengths": false
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,67 @@
+name: Isolated Huber Shadow Trial
+
+on:
+  workflow_call:
+    inputs:
+      session_date:
+        type: string
+        required: false
+        default: ''
+      verify_model:
+        type: boolean
+        required: false
+        default: false
+  workflow_dispatch:
+    inputs:
+      session_date:
+        description: Optional existing sealed input date; never reconstructs a past input
+        type: string
+        required: false
+      verify_model:
+        description: Verify the frozen model runtime without creating a live forecast
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fuel-huber-shadow-v1
+  cancel-in-progress: false
+
+jobs:
+  shadow:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install isolated ML dependencies only when needed
+        if: ${{ inputs.session_date != '' || inputs.verify_model }}
+        run: pip install -r requirements-shadow.txt
+      - name: Verify frozen model runtime
+        if: ${{ inputs.verify_model }}
+        run: python shadow_trial.py verify-model
+      - name: Compute from sealed decision-time inputs
+        if: ${{ inputs.session_date != '' }}
+        env:
+          SHADOW_SESSION_DATE: ${{ inputs.session_date }}
+        run: python shadow_trial.py forecast --date "$SHADOW_SESSION_DATE"
+      - name: Reconcile actual prices including delayed emails
+        run: python shadow_trial.py reconcile
+      - name: Audit trial status
+        id: trial_status
+        run: python shadow_trial.py status --github-output
+      - name: Install review dependencies at the fixed review boundary
+        if: ${{ steps.trial_status.outputs.review_due == 'true' && inputs.session_date == '' && !inputs.verify_model }}
+        run: pip install -r requirements-shadow.txt
+      - name: Record the single fixed-sample primary review
+        if: ${{ steps.trial_status.outputs.review_due == 'true' }}
+        run: python shadow_trial.py review
+      - name: Persist isolated immutable shadow records
+        run: python shadow_trial.py persist

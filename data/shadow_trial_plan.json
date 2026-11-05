@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "trial_name": "RB Huber prospective v1",
+  "registered_at": "2026-11-04T23:06:37.451989-06:00",
+  "start_session": "2026-11-05",
+  "commodity": "RB",
+  "settings": {
+    "model": "huber_gasoline_v1",
+    "sklearn_version": "1.7.1",
+    "window": 360,
+    "calibration_window": 120,
+    "purge": 1,
+    "huber_parameters": {
+      "epsilon": 1.35,
+      "alpha": 0.0001,
+      "max_iter": 1000,
+      "tol": 1e-06
+    },
+    "noise_floor_cents": 0.6,
+    "full_confidence": 0.75,
+    "lean_confidence": 0.65
+  },
+  "implementation_hashes": {
+    "shadow_trial.py": "cff760d88011a7808b1b957ee8182bc7834239a91ab452e4325f2e8b5e3538bd",
+    "shadow_model.py": "58321b51cd6814f388d9f393ba517a01a0ead0283005a1e64cac55cafe286a9d",
+    "alignment.py": "b1954bfb087549caaf51d363dc738c4045c21531779bd9b7f842d282eccc94fc",
+    "backtest.py": "e328026dc4f6fa8d02ccb6e3eebe7a1ec0e0ce94fe6b045243051f23ece71444",
+    "model.py": "133128d82c37409cbd35b3e901cf93174bd4e6430b1fe5a86570c07158775968",
+    "futures_util.py": "0e888eb70495d6070bbf296cbf4187b484044c903840abe36a9bd6fcf7715ef3",
+    "scratch/compare_ml_models.py": "b79aa8fbc47a6a0a7b67113674b506f805480e043558711b96443b97d9927b1e",
+    "scratch/compare_adaptive_models.py": "b8a27ad8700a929ced0cdc7ec45b3a752fb0de996419e1bc8564481d3120df90",
+    "requirements-shadow.txt": "ec8bce9f1ce19e266872b10b4659001ed6a2f686ee9fa8311a73e5e7b62a6cea",
+    "requirements.txt": "31f1ad6cb1fdeecd7ac1f4d9e4256677e4a5821084b138427612fb6f9c61a45f"
+  },
+  "primary": {
+    "metric": "paired_absolute_error_reduction_cents",
+    "formal_review_pairs": 320,
+    "operational_review_pairs": 60,
+    "alpha_one_sided": 0.025,
+    "planning_power": 0.8,
+    "planning_effect_cents": 0.15,
+    "planning_variance_cents_squared": 0.8759596732890009,
+    "minimum_practical_point_gain_cents": 0.1,
+    "bootstrap_resamples": 20000,
+    "bootstrap_blocks": [
+      5,
+      10,
+      20
+    ],
+    "optional_stopping": false
+  },
+  "minimum_on_time_forecast_coverage": 0.95,
+  "failure_policy": "retain_production_forecast_in_intention_to_treat_comparison",
+  "automatic_promotion": false,
+  "secondary_metrics": [
+    "rmse",
+    "brier_up",
+    "wrong_wait_cost",
+    "gross_timing_proxy"
+  ],
+  "execution_evidence_required_for_promotion": true,
+  "record_hash": "923113f81523474a545194ad96747d20121a85057f3e87710f9b1dda35f8758b"
+}

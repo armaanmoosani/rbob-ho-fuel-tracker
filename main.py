@@ -1869,6 +1869,23 @@ def fetch_all_commodities(now, access_token, alert_state):
     return all_data, alert_state_updates
 
 
+def capture_shadow_input(now):
+    """Best-effort sealed input capture, after the live verdict has been sent."""
+    try:
+        import shadow_trial
+        record = shadow_trial.capture(DATA_DIR, now, APP_CONFIG)
+        if record is None:
+            return
+        print(f"RB shadow input sealed for {record['session']}: {record['status']}")
+        forecast_path = shadow_trial.record_path(DATA_DIR, "forecasts", record['session'])
+        marker = os.environ.get("SHADOW_REQUEST_FILE")
+        if marker and not forecast_path.exists():
+            with open(marker, "w", encoding="utf-8") as handle:
+                handle.write(record['session'])
+    except Exception as exc:
+        print(f"::warning::Shadow capture failed; production verdict is unaffected: {exc}")
+
+
 def main():
     # Assert Chicago timezone is correctly recognized (Issue 10.1)
     assert TZ.zone == 'America/Chicago', "TimeZone mismatch: America/Chicago expected."
@@ -2019,6 +2036,7 @@ def main():
             'action': action,
             'action_color': '#8b5cf6'
         })
+        capture_shadow_input(datetime.now(TZ))
 
     if local_now.hour in [8, 12, 18]:
         # Build a compact live-price summary for the action line
