@@ -10,7 +10,7 @@ import re
 import smtplib
 import subprocess
 from email.mime.text import MIMEText
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import pytz
 from bs4 import BeautifulSoup
 import validate_data
@@ -211,8 +211,10 @@ def check_inbox_for_prices(target_date_str):
     try:
         mail.select('"[Gmail]/All Mail"')
         
-        # Look back 2 days to handle any timezone/date boundary differences
-        since_date = (datetime.now(TZ) - timedelta(days=2)).strftime("%d-%b-%Y")
+        # Anchor the search to the effective date being recovered. A Monday
+        # retry must still see Friday's posting, even if it arrived Saturday.
+        target_date = date.fromisoformat(target_date_str)
+        since_date = (target_date - timedelta(days=2)).strftime("%d-%b-%Y")
         
         # Broadened search: match subject keywords first, then fall back to domain
         search_query = f'(SINCE "{since_date}" SUBJECT "Latest prices")'
@@ -241,7 +243,9 @@ def check_inbox_for_prices(target_date_str):
                 email_date = email.utils.parsedate_to_datetime(msg.get('Date'))
                 print(f"Examining email From: {mask_sensitive_text(from_hdr)} Subject: {mask_sensitive_text(subject)} Date: {email_date.astimezone(TZ) if email_date else 'None'}")
 
-                # Verify that the email belongs to the target date
+                # Header dates are only a fallback when the posting does not
+                # state its effective date. Late delivery must not override
+                # an explicit, matching "good from" date in the body.
                 if not email_date:
                     continue
                 local_date_str = email_date.astimezone(TZ).date().isoformat()
@@ -252,17 +256,12 @@ def check_inbox_for_prices(target_date_str):
                 is_exact_match = (local_date_str == target_date_str)
                 is_late_morning_match = False
                 try:
-                    from datetime import date as _date
-                    target_date = _date.fromisoformat(target_date_str)
                     email_local_date = email_date.astimezone(TZ).date()
                     delta_days = (email_local_date - target_date).days
                     email_hour = email_date.astimezone(TZ).hour
                     is_late_morning_match = (delta_days == 1 and email_hour < 9)
                 except Exception:
                     pass
-
-                if not (is_exact_match or is_late_morning_match):
-                    continue
 
                 body = ""
                 if msg.is_multipart():
@@ -298,6 +297,8 @@ def check_inbox_for_prices(target_date_str):
                         continue
                 else:
                     print("Could not find 'good from' date in email body. Falling back to email header date matching.")
+                    if not (is_exact_match or is_late_morning_match):
+                        continue
 
                 # Primary extraction: labels near known markers
                 prices = {}
@@ -763,14 +764,24 @@ def ensure_trailing_newline(file_path):
 def target_date_candidates(now_local, existing_dates):
     """Return recent missing rack dates in the order they should be recovered."""
     today = now_local.date()
-    yesterday = today - timedelta(days=1)
+    prior_weekday = today - timedelta(days=1)
+    while prior_weekday.weekday() >= 5:
+        prior_weekday -= timedelta(days=1)
     candidates = []
 
     # Always recover a missing prior weekday first. GitHub scheduled jobs can
-    # start hours late, so execution time cannot decide whether yesterday's
-    # late-arriving price email still belongs to yesterday.
-    if yesterday.weekday() < 5 and yesterday.isoformat() not in existing_dates:
-        candidates.append(yesterday.isoformat())
+    # start hours late, including Friday's last retry arriving Saturday.
+    # Never append an older gap behind newer records: that requires a reviewed
+    # historical repair, not silently breaking the append-only integrity chain.
+    latest_existing = max((value for value in existing_dates
+                           if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value)), default="")
+    prior_date = prior_weekday.isoformat()
+    if prior_date not in existing_dates:
+        if prior_date > latest_existing:
+            candidates.append(prior_date)
+        else:
+            print(f"Missing rack date {prior_date} precedes existing history; "
+                  "a reviewed historical repair is required.")
 
     # Before noon, today's rack email is not expected yet. At/after noon, also
     # try today so a missing holiday email does not block the current session.

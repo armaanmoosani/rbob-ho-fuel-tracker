@@ -12,7 +12,8 @@ on:
     #
     # UTC 13-14 is 8:00-9:00 AM CT the next morning.  ingest_prices targets the
     # previous day before noon, so the Tue-Sat window retries Mon-Fri sessions;
-    # Monday morning is correctly absent because it would target Sunday.
+    # A still-missing Friday posting is also retried on Monday evening before
+    # Monday's posting, including emails delivered after Saturday's last run.
     - cron: '0 0,1,2,3,4,5,6,13,14 * * 2-6'
   workflow_dispatch:
 

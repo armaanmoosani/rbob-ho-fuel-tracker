@@ -2,8 +2,10 @@ import os
 os.environ['GRAVES_EMAIL'] = 'mock_graves@example.com'
 os.environ['GRAVES_APP_PASSWORD'] = 'mock_graves_pass'
 import sys
+import csv
 import tempfile
 import unittest
+from email.message import EmailMessage
 from unittest.mock import patch, MagicMock, mock_open
 from datetime import datetime
 import pytz
@@ -47,13 +49,112 @@ class TestRetryAndTargetDateLogic(unittest.TestCase):
 
         self.assertEqual(candidates, ["2026-09-22", "2026-09-23"])
 
-    def test_delayed_run_does_not_let_missing_weekend_block_today(self):
+    def test_monday_recovers_missing_friday_before_today(self):
         tz = pytz.timezone('America/Chicago')
         monday_afternoon = tz.localize(datetime(2026, 9, 28, 12, 38, 0))
 
         candidates = ingest_prices.target_date_candidates(monday_afternoon, set())
 
-        self.assertEqual(candidates, ["2026-09-28"])
+        self.assertEqual(candidates, ["2026-09-25", "2026-09-28"])
+
+    def test_monday_skips_recorded_friday_and_weekend(self):
+        tz = pytz.timezone('America/Chicago')
+        monday = tz.localize(datetime(2026, 9, 28, 12, 38))
+
+        self.assertEqual(ingest_prices.target_date_candidates(
+            monday, {"2026-09-25"}), ["2026-09-28"])
+
+    def test_weekend_only_targets_missing_friday(self):
+        tz = pytz.timezone('America/Chicago')
+        for day in (26, 27):
+            with self.subTest(day=day):
+                now = tz.localize(datetime(2026, 9, day, 12))
+                self.assertEqual(ingest_prices.target_date_candidates(now, set()),
+                                 ["2026-09-25"])
+
+    def test_candidates_do_not_append_old_gap_after_newer_history(self):
+        tz = pytz.timezone('America/Chicago')
+        monday = tz.localize(datetime(2026, 9, 28, 20))
+
+        self.assertEqual(ingest_prices.target_date_candidates(
+            monday, {"date", "2026-09-28"}), [])
+
+    def test_successive_runs_recover_friday_then_monday_with_valid_integrity(self):
+        tz = pytz.timezone('America/Chicago')
+        monday = tz.localize(datetime(2026, 11, 9, 21, 30))
+
+        def settlement(target):
+            return {
+                "date": target, "rbob_settlement": 2.7, "heating_oil_settlement": 4.3,
+                "rbob_contract": "/RBZ26", "heating_oil_contract": "/HOZ26",
+                "source": "live_prediction_snapshot",
+                "captured_at": f"{target}T13:30:00-06:00",
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            history = os.path.join(directory, "graves_history.csv")
+            with open(history, "w") as handle:
+                handle.write("date,nymex_rb,nymex_ho,rack_u,rack_p,rack_d\n"
+                             "2026-11-05,2.7633,4.3547,2.8170,3.6373,4.7624\n")
+            with patch('ingest_prices.DATA_DIR', directory), \
+                    patch('ingest_prices.CSV_PATH', history), \
+                    patch('ingest_prices.git_pull_rebase'), \
+                    patch('ingest_prices.git_commit_push') as push, \
+                    patch('ingest_prices.send_alert_email') as alert, \
+                    patch('ingest_prices.subprocess.run') as run, \
+                    patch('ingest_prices.datetime') as clock, \
+                    patch('ingest_prices.read_daily_settlement', side_effect=settlement), \
+                    patch('ingest_prices.check_inbox_for_prices',
+                          side_effect=lambda target: (target, (2.8, 3.6, 4.7))) as inbox:
+                clock.now.return_value = monday
+                run.return_value.stdout = ""
+                ingest_prices.main()
+                ingest_prices.main()
+                ingest_prices.validate_data.validate_all(directory)
+
+            with open(history) as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual([row['date'] for row in rows],
+                             ['2026-11-05', '2026-11-06', '2026-11-09'])
+            self.assertEqual([call.args[0] for call in inbox.call_args_list],
+                             ['2026-11-06', '2026-11-09'])
+            self.assertEqual(push.call_count, 2)
+            alert.assert_not_called()
+            with open(os.path.join(directory, 'nymex_settlement_provenance.csv')) as handle:
+                provenance = list(csv.DictReader(handle))
+            self.assertEqual(len(provenance), 4)
+            self.assertEqual({row['session_date'] for row in provenance},
+                             {'2026-11-06', '2026-11-09'})
+
+    @patch('ingest_prices.imaplib.IMAP4_SSL')
+    def test_explicit_effective_date_accepts_late_delivery_not_wrong_dates(self, mock_imap):
+        for sent_at, effective_date, expected in (
+            ("Sat, 07 Nov 2026 10:52:41 -0600", "11/6/2026", True),
+            ("Mon, 09 Nov 2026 09:30:00 -0600", "11/6/2026", True),
+            ("Fri, 06 Nov 2026 18:00:00 -0600", "11/5/2026", False),
+            ("Sat, 07 Nov 2026 10:52:41 -0600", "11/7/2026", False),
+            ("Sat, 07 Nov 2026 10:52:41 -0600", None, False),
+            ("Sat, 07 Nov 2026 08:59:00 -0600", None, True),
+            ("Fri, 06 Nov 2026 18:00:00 -0600", None, True),
+        ):
+            with self.subTest(sent_at=sent_at, effective_date=effective_date):
+                message = EmailMessage()
+                message['From'] = 'donotreply@gravesoil.com'
+                message['Subject'] = 'Latest prices from Graves Oil Company'
+                message['Date'] = sent_at
+                body = (f"Prices good from {effective_date} 7:00 PM.\n"
+                        if effective_date else "Latest prices\n")
+                message.set_content(body + "E10 - UNLEADED 3.01700\n"
+                                    "CLEAR DIESEL 3.74140\nE10 - PREMIUM 3.83730\n")
+                connection = mock_imap.return_value
+                connection.search.return_value = ("OK", [b"1"])
+                connection.fetch.return_value = ("OK", [(None, message.as_bytes())])
+
+                actual = ingest_prices.check_inbox_for_prices("2026-11-06")
+
+                self.assertEqual(actual, ("2026-11-06", (3.017, 3.8373, 3.7414))
+                                 if expected else (None, None))
+                self.assertIn('SINCE "04-Nov-2026"', connection.search.call_args[0][1])
     
     @patch('ingest_prices.datetime')
     def test_target_date_calculation_daytime(self, mock_datetime):
