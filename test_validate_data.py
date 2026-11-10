@@ -64,7 +64,7 @@ class TestValidateData(unittest.TestCase):
             "signal_contract": "/RBM26",
             "baseline_contract": "/RBM26",
             "settlement_source": "schwab",
-            "baseline_source": "schwab_close_price",
+            "baseline_source": "settlement_provenance_verified",
             "settlement_captured_at": "2026-05-20T13:30:00-05:00",
             "contract_provenance_status": "verified",
             "log_schema_version": "3",
@@ -217,6 +217,54 @@ class TestValidateData(unittest.TestCase):
         pd.DataFrame([row]).to_csv(self.log_path, index=False)
 
         validate_data.validate_prediction_log(self.log_path)
+
+    def test_validate_prediction_log_accepts_fallback_threshold_floor(self):
+        for commodity in ("RB", "HO"):
+            for floor in (1.2, 2.1):
+                with self.subTest(commodity=commodity, floor=floor):
+                    artifact = self._calibration_artifact()
+                    calibration = artifact["calibration"]
+                    for key, value in list(calibration.items()):
+                        if key.startswith("RB_"):
+                            calibration[key.replace("RB_", f"{commodity}_", 1)] = value
+                    calibration["FALLBACK_NOISE_FLOOR_CENTS"] = floor
+                    artifact["artifact_id"] = artifact_id(artifact)
+                    artifact_path = self._write_artifact(artifact)
+                    row = self._captured_prediction(artifact["artifact_id"])
+                    row.update({
+                        "commodity": commodity,
+                        "signal_contract": f"/{commodity}M26",
+                        "baseline_contract": f"/{commodity}M26",
+                        "baseline_source": "schwab_close_price",
+                        "hike_threshold_used": max(1.8, floor),
+                        "drop_threshold_used": min(-1.5, -floor),
+                        "lean_hike_threshold_used": floor,
+                        "lean_drop_threshold_used": -floor,
+                        "predicted_direction": "HIKE" if floor <= 2.0 else "FLAT",
+                        "threshold_used": 1.8 if floor <= 2.0 else 0.0,
+                    })
+                    pd.DataFrame([row]).to_csv(self.log_path, index=False)
+
+                    validate_data.validate_prediction_log(self.log_path, artifact_path)
+
+    def test_validate_prediction_log_rejects_incorrect_fallback_thresholds(self):
+        artifact = self._calibration_artifact()
+        artifact_path = self._write_artifact(artifact)
+        for source, lean_hike, lean_drop in (
+                ("schwab_close_price", 0.9, -0.8),
+                ("schwab_close_price", 1.3, -1.3),
+                ("settlement_provenance_verified", 1.2, -1.2)):
+            with self.subTest(source=source, lean_hike=lean_hike):
+                row = self._captured_prediction(artifact["artifact_id"])
+                row.update({
+                    "baseline_source": source,
+                    "lean_hike_threshold_used": lean_hike,
+                    "lean_drop_threshold_used": lean_drop,
+                })
+                pd.DataFrame([row]).to_csv(self.log_path, index=False)
+
+                with self.assertRaises(SystemExit):
+                    validate_data.validate_prediction_log(self.log_path, artifact_path)
 
     def test_validate_prediction_log_rejects_unknown_immutable_artifact(self):
         artifact = self._calibration_artifact()

@@ -8,6 +8,7 @@ import re
 import math
 from datetime import date, datetime, timedelta
 from calibration_artifacts import load_calibration_artifacts
+from signal_thresholds import effective_signal_thresholds
 
 def get_good_friday(year):
     # Meeus/Jones/Butcher algorithm for Gregorian Easter
@@ -411,6 +412,14 @@ def validate_prediction_log(log_path, artifact_path=None):
                 'window_used': f'{commodity}_window_days',
                 'lag_used': 'LAG_DAYS',
             }
+            threshold_fields = {
+                'hike_threshold_used': 'hike',
+                'drop_threshold_used': 'drop',
+                'lean_hike_threshold_used': 'lean_hike',
+                'lean_drop_threshold_used': 'lean_drop',
+            }
+            effective_thresholds = effective_signal_thresholds(
+                calibration, commodity, row['baseline_source'])
             for row_field, calibration_field in calibration_fields.items():
                 if calibration_field not in calibration:
                     print("Data validation failed: Prediction calibration artifact lacks "
@@ -418,7 +427,11 @@ def validate_prediction_log(log_path, artifact_path=None):
                     sys.exit(1)
                 try:
                     recorded = float(row[row_field])
-                    calibrated = float(calibration[calibration_field])
+                    # Validate the exact live rule against this immutable
+                    # artifact, never against today's mutable metrics cache.
+                    calibrated = float(
+                        effective_thresholds[threshold_fields[row_field]]
+                        if row_field in threshold_fields else calibration[calibration_field])
                 except (KeyError, TypeError, ValueError):
                     print("Data validation failed: Captured live conviction has an invalid "
                           f"artifact-backed {row_field}.")

@@ -46,6 +46,7 @@ import re
 import csv
 import hashlib
 import model
+from signal_thresholds import CALIBRATED_BASELINE_SOURCES, effective_signal_thresholds
 from calibration_artifacts import (
     CalibrationArtifactUnavailable,
     artifact_for_session,
@@ -631,15 +632,6 @@ VERDICT_LATE_AFTER_MINUTES = 10
 
 LOW_CONFIDENCE_CUTOFF = 0.70
 
-# Baseline sources that are the same measurement the model was fitted on, so a
-# delta built from them carries no source mismatch and the calibrated
-# thresholds apply as published.  Anything else gets the fallback floor.
-CALIBRATED_BASELINE_SOURCES = frozenset({
-    "settlement_provenance_verified",
-    "graves_history_same_contract",
-})
-
-
 def describe_confidence(probability):
     """Human label for a calibrated probability.
 
@@ -975,30 +967,21 @@ def build_rack_signal(prefix, data, now):
 
     hike_thresh = APP_CONFIG.get(f"{prefix}_HIKE_THRESHOLD_CENTS", 1.0)
     drop_thresh = APP_CONFIG.get(f"{prefix}_DROP_THRESHOLD_CENTS", -1.0)
-    lean_hike = APP_CONFIG.get(f"{prefix}_LEAN_HIKE_CENTS", 0.5)
-    lean_drop = APP_CONFIG.get(f"{prefix}_LEAN_DROP_CENTS", -0.5)
-
     # The cached thresholds assume the baseline came from the same source the
     # model was fitted on.  When it did not, this delta carries a source
     # mismatch worth a robust 0.51c (p95 1.04c), so the thresholds are widened
     # to the fallback floor for this decision only.  Without this the floor
     # reduction that unlocked the tighter thresholds would silently apply to
     # decisions that have not earned it.
-    baseline_matches_calibration = data.get("baseline_source") in CALIBRATED_BASELINE_SOURCES
-    if not baseline_matches_calibration:
-        fallback_floor = APP_CONFIG.get("FALLBACK_NOISE_FLOOR_CENTS", 1.2)
-        widened_hike = max(hike_thresh, fallback_floor)
-        widened_drop = min(drop_thresh, -fallback_floor)
-        if (widened_hike, widened_drop) != (hike_thresh, drop_thresh):
-            print(f"[{prefix}] Baseline source '{data.get('baseline_source')}' is not the "
-                  f"calibration source; widening thresholds "
-                  f"{hike_thresh:+.2f}/{drop_thresh:+.2f} -> "
-                  f"{widened_hike:+.2f}/{widened_drop:+.2f}.")
-        hike_thresh, drop_thresh = widened_hike, widened_drop
-        lean_hike = max(lean_hike, fallback_floor)
-        lean_drop = min(lean_drop, -fallback_floor)
-    lean_hike = min(lean_hike, hike_thresh)
-    lean_drop = max(lean_drop, drop_thresh)
+    thresholds = effective_signal_thresholds(APP_CONFIG, prefix, data.get("baseline_source"))
+    widened_hike, widened_drop = thresholds["hike"], thresholds["drop"]
+    if (widened_hike, widened_drop) != (hike_thresh, drop_thresh):
+        print(f"[{prefix}] Baseline source '{data.get('baseline_source')}' is not the "
+              f"calibration source; widening thresholds "
+              f"{hike_thresh:+.2f}/{drop_thresh:+.2f} -> "
+              f"{widened_hike:+.2f}/{widened_drop:+.2f}.")
+    hike_thresh, drop_thresh = widened_hike, widened_drop
+    lean_hike, lean_drop = thresholds["lean_hike"], thresholds["lean_drop"]
 
     nymex_daily_std = APP_CONFIG.get(f"{prefix}_nymex_daily_std", 1.0)
     z_score = change_cents / nymex_daily_std if nymex_daily_std > 0 else 0.0
