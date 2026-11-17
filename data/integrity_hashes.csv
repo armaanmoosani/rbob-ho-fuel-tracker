@@ -647,3 +647,6 @@ timestamp,file_name,line_count,sha256
 2026-11-14T03:00:44.086484,nymex_settlement_provenance.csv,167,d04f8e6fb8a0495fa3c65fef5d5f84d3c28d9aa6ba49eba621cced08dae84b44
 2026-11-14T03:00:49.418372,metrics_cache.json,285,c1a20db6cdf06c9e6d7604a8c505e29a5ddfcbe95349bdb2bf6dceb5998099f0
 2026-11-14T03:00:49.459499,calibration_runs.jsonl,86,fbad95c6bfbdc3c1dc615dfcf7d6409a8f9b472d0801eeb2ebebf94cffa0c200
+2026-11-17T03:00:50.501655,prediction_log.csv,1464,3d9d2c7f3ea19b2bbfacf7bc7b1604bf988b5f7a4db31c97d0349fa74c90e117
+2026-11-17T03:00:51.624076,graves_history.csv,890,eabe2b3ce7e3814564fbcca9f023992035d6f2776ae1ba8831559830be8caf4d
+2026-11-17T03:00:51.650850,nymex_settlement_provenance.csv,169,eb239588e65abf2eba245c5b7c57c9377cd3acc252234e4e3fb9d4f2efe1228c
