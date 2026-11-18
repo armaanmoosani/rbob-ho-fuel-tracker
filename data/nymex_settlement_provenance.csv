@@ -167,3 +167,5 @@ session_date,commodity,settlement_price,schwab_symbol,yfinance_symbol,source,cap
 2026-11-13,HO,4.2601,/HOZ26,,schwab,2026-11-13T13:30:44.359990-06:00,verified
 2026-11-16,RB,2.5369,/RBZ26,,schwab,2026-11-16T13:30:48.466696-06:00,verified
 2026-11-16,HO,4.0790,/HOZ26,,schwab,2026-11-16T13:30:48.466696-06:00,verified
+2026-11-17,RB,2.5387,/RBZ26,,schwab,2026-11-17T13:30:47.897566-06:00,verified
+2026-11-17,HO,4.0509,/HOZ26,,schwab,2026-11-17T13:30:47.897566-06:00,verified
