@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "plan_hash": "923113f81523474a545194ad96747d20121a85057f3e87710f9b1dda35f8758b",
+  "session": "2026-11-27",
+  "input_hash": "b470ddbece4beccd015ccf1097a46d2298bcb45b4522787e21af2c82d2821557",
+  "computed_at": "2026-11-27T14:36:15.024808-06:00",
+  "status": "ineligible",
+  "reason": "Production signal is not an eligible same-contract settlement verdict",
+  "record_hash": "dbbd28d0af8549cf6cb7387898dc222ef45028f8d731a3c113d822eff70374af"
+}
